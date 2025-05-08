@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.log
+*.pot
+*.mo
+venv/
+env/
+.env/
+# If you have a virtual environment folder not named venv or env
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*~
+*.sublime-project
+*.sublime-workspace
+
+# Configuration files (if local and sensitive, or user-specific)
+# The main config file is akita_zmodem_meshcore_config.json.
+# Users might want to commit a template, but often not their specific instance.
+# If you decide to include a template in the repo, name it differently (e.g., config.template.json)
+# and add the actual config file name here.
+# akita_zmodem_meshcore_config.json
+
+# Temporary files created by the script
+temp_akita_dir_*.zip
+
+# Distribution / packaging
+.Python
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+.installed.cfg
+MANIFEST
+
+# Static analysis & Coverage
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Secrets (if any were to be used, though not typical for this app type)
+*.env
+secrets.py
