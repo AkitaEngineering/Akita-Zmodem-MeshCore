@@ -1,0 +1,18 @@
+# Core dependencies for Akita-Zmodem-MeshCore
+
+# For MeshCore network communication
+# Please ensure the installed 'meshcore' library is compatible with the API used in the script
+# (e.g., fdlamotte/meshcore_py or a similar asyncio-based library with 'create_serial', 'subscribe', 'commands.send_msg')
+meshcore
+
+# For Zmodem protocol implementation
+# The script is written assuming a standard 'zmodem' library API.
+# Actual behavior depends on the specific library installed by this name.
+zmodem
+
+# For asynchronous file operations
+aiofiles
+
+# CRC calculation, often a dependency for Zmodem implementations.
+# May be pulled in by 'zmodem' automatically, but listed for explicitness.
+crcmod
