@@ -1,0 +1,11 @@
+{
+  "zmodem_app_port": 2001,
+  "chunk_size": 256,
+  "mesh_packet_chunk_size": 128,
+  "timeout": 60,
+  "mesh_connection_type": "serial",
+  "mesh_serial_port": "/dev/ttyUSB0",
+  "mesh_serial_baud": 115200,
+  "mesh_tcp_host": "127.0.0.1",
+  "mesh_tcp_port": 4403
+}
