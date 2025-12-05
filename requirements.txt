@@ -11,7 +11,8 @@ meshcore
 zmodem
 
 # For asynchronous file operations
-aiofiles tqdm
+aiofiles 
+tqdm
 
 # CRC calculation, often a dependency for Zmodem implementations.
 # May be pulled in by 'zmodem' automatically, but listed for explicitness.
