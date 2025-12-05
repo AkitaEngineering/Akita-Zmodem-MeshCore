@@ -32,6 +32,7 @@ env/
 
 # Temporary files created by the script
 temp_akita_dir_*.zip
+akita_*.zip
 
 # Distribution / packaging
 .Python
@@ -69,3 +70,6 @@ Desktop.ini
 # Secrets (if any were to be used, though not typical for this app type)
 *.env
 secrets.py
+
+akita_zmodem_meshcore_config.json
+
