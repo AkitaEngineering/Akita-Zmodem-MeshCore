@@ -11,7 +11,7 @@ We encourage contributions in various forms:
     * Detailed steps to reproduce the bug.
     * What you expected to happen and what actually happened.
     * Your operating system, Python version.
-    * Versions of key libraries (`meshcore`, `zmodem`, `aiofiles`).
+    * Versions of key libraries (`meshcore`, `zmodem`, `tqdm`).
     * Any relevant console output, logs (especially with debug logging if possible), or error messages.
     * Screenshots or screencasts if they help illustrate the problem.
 
