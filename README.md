@@ -41,7 +41,7 @@ This version of Akita-Zmodem-MeshCore has been significantly refactored to work 
     ```bash
     pip install -r requirements.txt
     ```
-    This will attempt to install `meshcore`, `zmodem`, `aiofiles`, and `crcmod` (often a zmodem dependency). Ensure `meshcore` installs a library compatible with the script's usage.
+    This will attempt to install `meshcore`, `zmodem`, `tqdm`, and `crcmod` (often a zmodem dependency). Ensure `meshcore` installs a library compatible with the script's usage.
 
 ## Configuration
 

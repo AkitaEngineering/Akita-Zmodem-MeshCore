@@ -10,8 +10,6 @@ meshcore
 # Actual behavior depends on the specific library installed by this name.
 zmodem
 
-# For asynchronous file operations
-aiofiles 
 tqdm
 
 # CRC calculation, often a dependency for Zmodem implementations.

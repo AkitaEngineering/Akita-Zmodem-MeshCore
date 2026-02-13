@@ -25,18 +25,20 @@ def check_dependency(module_name, pip_name):
 
 check_dependency("meshcore", "meshcore")
 check_dependency("zmodem", "zmodem")
-check_dependency("aiofiles", "aiofiles")
+
+from meshcore import MeshCore, EventType
+import zmodem
 
 # Optional: TQDM for progress bars
 try:
     from tqdm.asyncio import tqdm
     TQDM_AVAILABLE = True
-except ImportError:
+except Exception:
     TQDM_AVAILABLE = False
-    # Log to stderr so it doesn't pollute piped output
-    print("Suggestion: Install 'tqdm' for progress bars (pip install tqdm)", file=sys.stderr)
-
-from meshcore import MeshCore, EventType
+    try:
+        print("Suggestion: Install 'tqdm' for progress bars (pip install tqdm)", file=sys.stderr)
+    except Exception:
+        pass
 
 # -----------------------------------------------------------------------------
 # Configuration & Constants
@@ -178,7 +180,6 @@ class AkitaZmodemMeshCore:
         logging.info(f"[Tx-{tid}] File: {os.path.basename(filepath)} | Size: {fsize:,} bytes | MD5: {checksum}")
 
         try:
-            import zmodem
             # Open file in thread to avoid blocking loop
             sync_f = await asyncio.to_thread(open, filepath, "rb")
             sender = await asyncio.to_thread(zmodem.Sender, sync_f)
@@ -281,7 +282,6 @@ class AkitaZmodemMeshCore:
             except Exception as e: logging.error(f"Listener Error: {e}")
 
     async def _handle_zmodem_data(self, src, data):
-        import zmodem
         active_tid = None
         
         # Match incoming packet to transfer
@@ -324,24 +324,34 @@ class AkitaZmodemMeshCore:
     # Directory Handling & Management
     # -------------------------------------------------------------------------
     async def send_directory(self, dest, path, cli_event):
-        zip_name = f"akita_{os.path.basename(path)}_{int(time.time())}.zip"
+        zip_name = os.path.abspath(f"akita_{os.path.basename(path)}_{int(time.time())}.zip")
         logging.info(f"Compressing directory '{path}'...")
-        
+
         def _zip():
             with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as z:
                 for root, _, files in os.walk(path):
                     for file in files:
                         p = os.path.join(root, file)
                         z.write(p, os.path.relpath(p, path))
-        
+
         await asyncio.to_thread(_zip)
+
         f_event = asyncio.Event()
         tid = await self.send_file(dest, zip_name, f_event)
-        
-        if tid:
-            await f_event.wait()
-            if os.path.exists(zip_name): os.remove(zip_name)
-        if cli_event: cli_event.set()
+
+        try:
+            if tid:
+                await f_event.wait()
+        finally:
+            # Ensure the temporary zip is removed where possible
+            try:
+                if os.path.exists(zip_name):
+                    os.remove(zip_name)
+            except Exception as e:
+                logging.warning(f"Failed to remove temp zip '{zip_name}': {e}")
+            if cli_event:
+                try: cli_event.set()
+                except Exception: pass
 
     async def receive_directory(self, path, overwrite, cli_event):
         if not os.path.exists(path): os.makedirs(path)
