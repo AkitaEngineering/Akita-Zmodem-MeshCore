@@ -8,7 +8,7 @@ This utility is designed for asynchronous operation, making it suitable for envi
 
 ## Key Features
 
-* **Zmodem Protocol**: Implements Zmodem for reliable file transfers. (Full resumability depends on session state and Zmodem library capabilities).
+* **Internal Zmodem**: Uses an in‑tree, lightweight Zmodem-like implementation to avoid external dependencies. (More complete protocol features can be added if needed.)
 * **MeshCore Integration**: Adapted to utilize Python bindings for MeshCore networks (specifically targeting `fdlamotte/meshcore_py` or a compatible API).
 * **Asynchronous Operations**: Uses `asyncio` for non-blocking I/O, improving performance and responsiveness.
 * **File and Directory Transfer**: Supports sending and receiving individual files and entire directories (via zip archives).
@@ -65,10 +65,18 @@ This version of Akita-Zmodem-MeshCore has been significantly refactored to work 
 The utility is controlled via command-line arguments.
 
 ```bash
-python akita_zmodem_meshcore.py [CONNECTION_ARGS] [COMMAND] [COMMAND_ARGS]
+python akita_zmodem_meshcore.py [OPTIONS] [COMMAND] [COMMAND_ARGS]
 ```
 
-Global Connection Arguments (Optional, override config):
+Global Options (Optional, override config file):
+
+```
+--config <path>          Path to JSON configuration file (created if missing)
+--mesh-type [serial|tcp] Override connection type
+--serial-port <PORT_PATH> (e.g., /dev/ttyUSB0, COM3)
+--serial-baud <BAUDRATE>
+--tcp-host <HOST_IP_OR_NAME>
+--tcp-port <PORT_NUMBER>
 
 ```
 --mesh-type [serial|tcp]
@@ -98,8 +106,13 @@ python akita_zmodem_meshcore.py send <destination_node_id> <path/to/file_or_dir>
 Receive a file or directory:
 
 ```bash
-python akita_zmodem_meshcore.py receive <path/to/save_location> [--overwrite]
+python akita_zmodem_meshcore.py receive <path/to/save_location> [--overwrite] [--directory]
 ```
+
+* `--directory` forces the path to be treated as a directory even if it does not
+  yet exist or lacks a recognisable extension.  The utility will also infer
+  directory mode automatically when the target already exists and is a
+  directory.
 
 Note: For directory reception, provide the path where the directory's contents should be extracted.
 

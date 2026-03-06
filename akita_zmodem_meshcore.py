@@ -23,8 +23,8 @@ def check_dependency(module_name, pip_name):
         print(f"Please install it: pip install {pip_name}")
         sys.exit(1)
 
+# only validate meshcore; zmodem is implemented in-tree now
 check_dependency("meshcore", "meshcore")
-check_dependency("zmodem", "zmodem")
 
 from meshcore import MeshCore, EventType
 import zmodem
@@ -46,7 +46,10 @@ except Exception:
 CONFIG_FILE = "akita_zmodem_meshcore_config.json"
 DEFAULT_CONFIG = {
     "zmodem_app_port": 2001,
-    "chunk_size": 256,             # Internal Zmodem buffer size
+    # "chunk_size" is included for completeness but is unused by the
+    # current implementation; some third‑party zmodem wrappers expose a
+    # chunk size parameter so we keep the value here for compatibility.
+    "chunk_size": 256,             # Internal Zmodem buffer size (unused)
     "mesh_packet_chunk_size": 200, # Max payload per mesh packet (LoRa MTU safe)
     "timeout": 120,                # Extended timeout for slow links
     "mesh_connection_type": "serial",
@@ -72,23 +75,41 @@ logging.basicConfig(
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-def load_config():
+def load_config(config_file: str = None):
+    """Return configuration dictionary from the given JSON file.
+
+    If the file does not exist or is not valid JSON we overwrite it with the
+    default settings.  The caller may supply an alternate path (for example
+    when the CLI ``--config`` argument is used).
+    """
+    if config_file is None:
+        config_file = CONFIG_FILE
+
     try:
-        with open(CONFIG_FILE, "r") as f:
+        with open(config_file, "r") as f:
             loaded = json.load(f)
-            config = DEFAULT_CONFIG.copy()
-            config.update(loaded)
-            return config
+            cfg = DEFAULT_CONFIG.copy()
+            cfg.update(loaded)
+            return cfg
     except (FileNotFoundError, json.JSONDecodeError):
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(DEFAULT_CONFIG, f, indent=4)
+        try:
+            with open(config_file, "w") as f:
+                json.dump(DEFAULT_CONFIG, f, indent=4)
+        except Exception:
+            # best effort; if we can’t write the file just continue with
+            # defaults – the user can fix permissions manually.
+            pass
         return DEFAULT_CONFIG
 
-config_data = load_config()
-ZMODEM_APP_PORT = config_data["zmodem_app_port"]
-MESH_PACKET_CHUNK_SIZE = config_data["mesh_packet_chunk_size"]
-TIMEOUT = config_data["timeout"]
-TX_DELAY_S = config_data.get("tx_delay_ms", 150) / 1000.0
+# The constants below are populated lazily from the first instance so that
+# CLI overrides (and alternate config file paths) work correctly.  They remain
+# here primarily for backward compatibility with external code or tests that
+# import them directly.
+config_data = None
+ZMODEM_APP_PORT = None
+MESH_PACKET_CHUNK_SIZE = None
+TIMEOUT = None
+TX_DELAY_S = None
 
 def calculate_md5(filepath):
     """Calculates MD5 checksum of a file for integrity verification."""
@@ -102,15 +123,31 @@ def calculate_md5(filepath):
 # Core Class
 # -----------------------------------------------------------------------------
 class AkitaZmodemMeshCore:
-    def __init__(self, cli_config_overrides=None):
+    def __init__(self, cli_config_overrides=None, config_file: str = None):
         self.mesh = None
         self.transfers = {}
         self.transfer_id_counter = 0
         self.running = True
         self._mesh_receive_queue = asyncio.Queue()
-        self.app_config = config_data.copy()
+
+        base = load_config(config_file)
+        self.app_config = base.copy()
         if cli_config_overrides:
             self.app_config.update(cli_config_overrides)
+
+        # compute frequently-used values once per instance
+        self.zmodem_app_port = self.app_config.get("zmodem_app_port", DEFAULT_CONFIG["zmodem_app_port"])
+        self.mesh_packet_chunk_size = self.app_config.get("mesh_packet_chunk_size", DEFAULT_CONFIG["mesh_packet_chunk_size"])
+        self.timeout = self.app_config.get("timeout", DEFAULT_CONFIG["timeout"])
+        self.tx_delay_s = self.app_config.get("tx_delay_ms", DEFAULT_CONFIG["tx_delay_ms"]) / 1000.0
+
+        # update module globals so tests relying on them remain valid
+        global config_data, ZMODEM_APP_PORT, MESH_PACKET_CHUNK_SIZE, TIMEOUT, TX_DELAY_S
+        config_data = base
+        ZMODEM_APP_PORT = self.zmodem_app_port
+        MESH_PACKET_CHUNK_SIZE = self.mesh_packet_chunk_size
+        TIMEOUT = self.timeout
+        TX_DELAY_S = self.tx_delay_s
 
     def generate_transfer_id(self):
         self.transfer_id_counter += 1
@@ -182,7 +219,10 @@ class AkitaZmodemMeshCore:
         try:
             # Open file in thread to avoid blocking loop
             sync_f = await asyncio.to_thread(open, filepath, "rb")
-            sender = await asyncio.to_thread(zmodem.Sender, sync_f)
+            # let the sender know the configured chunk size (legacy key
+            # "chunk_size", kept for compatibility)
+            sz = self.app_config.get("chunk_size", DEFAULT_CONFIG["chunk_size"])
+            sender = await asyncio.to_thread(zmodem.Sender, sync_f, sz)
         except Exception as e:
             logging.error(f"Zmodem Init Error: {e}")
             if 'sync_f' in locals() and sync_f: sync_f.close()
@@ -219,18 +259,20 @@ class AkitaZmodemMeshCore:
                 packet = await asyncio.to_thread(sender.get_next_packet)
 
                 if packet:
+                    logging.debug(f"[Tx-{tid}] next packet size {len(packet)} state={sender.state}")
                     # Construct Payload: [PORT HEADER] + [ZMODEM DATA]
-                    full_payload = struct.pack(APP_PORT_HEADER_FORMAT, ZMODEM_APP_PORT) + packet
+                    full_payload = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port) + packet
                     
                     # Chunking
                     chunk_len = len(full_payload)
-                    for i in range(0, chunk_len, MESH_PACKET_CHUNK_SIZE):
-                        chunk = full_payload[i:i + MESH_PACKET_CHUNK_SIZE]
+                    for i in range(0, chunk_len, self.mesh_packet_chunk_size):
+                        chunk = full_payload[i:i + self.mesh_packet_chunk_size]
                         try:
+                            logging.debug(f"[Tx-{tid}] sending chunk {len(chunk)}")
                             await self.mesh.commands.send_msg(destination=dest, payload=chunk)
                             t["last_act"] = time.time()
                             # Throttle
-                            await asyncio.sleep(TX_DELAY_S) 
+                            await asyncio.sleep(self.tx_delay_s)
                         except Exception as e:
                             logging.warning(f"[Tx-{tid}] Send Fail: {e}")
                             await asyncio.sleep(1.0) # Backoff
@@ -258,7 +300,7 @@ class AkitaZmodemMeshCore:
         self.transfers[tid] = {
             "state": "waiting", "receiver": None, "sync_f": None,
             "file": filepath, "dest": None, "start": time.time(),
-            "last_act": time.time(), "buffer": b"", "bytes": 0,
+            "last_act": time.time(), "bytes": 0,
             "cli_event": cli_event
         }
         logging.info(f"[Rx-{tid}] Listening... Destination: {filepath}")
@@ -275,7 +317,8 @@ class AkitaZmodemMeshCore:
                 if len(data) <= APP_PORT_HEADER_SIZE: continue
 
                 port = struct.unpack(APP_PORT_HEADER_FORMAT, data[:APP_PORT_HEADER_SIZE])[0]
-                if port == ZMODEM_APP_PORT:
+                if port == self.zmodem_app_port:
+                    # strip header and deliver to protocol handler
                     await self._handle_zmodem_data(src, data[APP_PORT_HEADER_SIZE:])
                 
             except asyncio.TimeoutError: pass
@@ -297,35 +340,69 @@ class AkitaZmodemMeshCore:
             elif t["state"] == "receiving" and t["dest"] == src:
                 active_tid = tid
                 break
+            elif t["state"] == "sending" and t.get("dest") == src:
+                # control data for a sending transfer (e.g. ACK/resume)
+                active_tid = tid
+                break
         
         if not active_tid: return
 
         t = self.transfers[active_tid]
         t["last_act"] = time.time()
-        t["buffer"] += data
-        receiver = t["receiver"]
 
-        try:
-            # Feed Zmodem Receiver
-            await asyncio.to_thread(receiver.receive, t["buffer"])
-            t["bytes"] += len(t["buffer"])
-            t["buffer"] = b"" # Flush
+        # data may need to be delivered to either receiver or sender depending on state
+        if t["state"] == "receiving":
+            receiver = t["receiver"]
 
-            if await asyncio.to_thread(receiver.is_finished):
-                logging.info(f"[Rx-{active_tid}] Transfer Complete.")
-                checksum = calculate_md5(t["file"])
-                logging.info(f"[Rx-{active_tid}] File Saved. MD5: {checksum}")
+            try:
+                # Feed Zmodem Receiver with the raw data chunk; the receiver
+                # object maintains its own internal buffer so we don't need to
+                # aggregate across mesh packets.  Log the size for debugging
+                logging.debug(f"[Rx-{active_tid}] delivering {len(data)} bytes to receiver")
+                resp = await asyncio.to_thread(receiver.receive, data)
+                t["bytes"] += len(data)
+                logging.debug(f"[Rx-{active_tid}] receiver state={receiver.state} resp_len={len(resp) if resp else 0}")
+
+                if resp:
+                    # send response immediately back to source (include header)
+                    resp_payload = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port) + resp
+                    logging.debug(f"[Rx-{active_tid}] sending {len(resp)} bytes back")
+                    await self.mesh.commands.send_msg(destination=src, payload=resp_payload)
+
+                if await asyncio.to_thread(receiver.is_finished):
+                    logging.info(f"[Rx-{active_tid}] Transfer Complete.")
+                    checksum = calculate_md5(t["file"])
+                    logging.info(f"[Rx-{active_tid}] File Saved. MD5: {checksum}")
+                    self.cancel_transfer(active_tid)
+            except Exception as e:
+                logging.error(f"[Rx-{active_tid}] Zmodem Protocol Error: {e}")
                 self.cancel_transfer(active_tid)
-        except Exception as e:
-            logging.error(f"[Rx-{active_tid}] Zmodem Protocol Error: {e}")
-            self.cancel_transfer(active_tid)
+
+        elif t["state"] == "sending" and t.get("sender"):
+            # incoming control data for the sender side
+            try:
+                logging.debug(f"[Tx-{active_tid}] delivering {len(data)} bytes to sender")
+                resp = await asyncio.to_thread(t["sender"].receive, data)
+                logging.debug(f"[Tx-{active_tid}] sender returned {len(resp) if resp else 0} bytes")
+                if resp:
+                    # wrap with port header
+                    resp_payload = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port) + resp
+                    await self.mesh.commands.send_msg(destination=src, payload=resp_payload)
+            except Exception as e:
+                logging.error(f"[Tx-{active_tid}] Protocol error: {e}")
 
     # -------------------------------------------------------------------------
     # Directory Handling & Management
     # -------------------------------------------------------------------------
     async def send_directory(self, dest, path, cli_event):
-        zip_name = os.path.abspath(f"akita_{os.path.basename(path)}_{int(time.time())}.zip")
-        logging.info(f"Compressing directory '{path}'...")
+        # create temporary zip file in system temp directory to avoid cluttering
+        # the working directory; the file is deleted when the transfer finishes
+        # (or on error).
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
+            zip_name = tf.name
+        logging.info(f"Compressing directory '{path}' into {zip_name}...")
 
         def _zip():
             with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as z:
@@ -334,7 +411,19 @@ class AkitaZmodemMeshCore:
                         p = os.path.join(root, file)
                         z.write(p, os.path.relpath(p, path))
 
-        await asyncio.to_thread(_zip)
+        try:
+            await asyncio.to_thread(_zip)
+        except Exception as e:
+            logging.error(f"Error compressing directory '{path}': {e}")
+            # cleanup temp file if it exists
+            try:
+                if os.path.exists(zip_name):
+                    os.remove(zip_name)
+            except Exception:
+                pass
+            if cli_event:
+                cli_event.set()
+            return None
 
         f_event = asyncio.Event()
         tid = await self.send_file(dest, zip_name, f_event)
@@ -364,8 +453,13 @@ class AkitaZmodemMeshCore:
             await f_event.wait()
             if os.path.exists(zip_name):
                 logging.info(f"Extracting to '{path}'...")
-                await asyncio.to_thread(lambda: zipfile.ZipFile(zip_name, 'r').extractall(path))
-                os.remove(zip_name)
+                try:
+                    await asyncio.to_thread(lambda: zipfile.ZipFile(zip_name, 'r').extractall(path))
+                except Exception as e:
+                    logging.error(f"Failed to extract received zip '{zip_name}': {e}")
+                finally:
+                    try: os.remove(zip_name)
+                    except: pass
         if cli_event: cli_event.set()
 
     def cancel_transfer(self, tid):
@@ -383,7 +477,7 @@ class AkitaZmodemMeshCore:
         while self.running:
             now = time.time()
             for tid in list(self.transfers.keys()):
-                if now - self.transfers[tid]["last_act"] > TIMEOUT:
+                if now - self.transfers[tid]["last_act"] > self.timeout:
                     logging.warning(f"[Tx/Rx-{tid}] Timeout. Cancelling.")
                     self.cancel_transfer(tid)
             await asyncio.sleep(5)
@@ -400,10 +494,16 @@ class AkitaZmodemMeshCore:
 # -----------------------------------------------------------------------------
 async def main():
     parser = argparse.ArgumentParser(description="Akita-Zmodem-MeshCore")
-    parser.add_argument("--config", default=CONFIG_FILE)
-    parser.add_argument("--mesh-type", choices=["serial", "tcp"])
-    parser.add_argument("--serial-port")
-    parser.add_argument("--serial-baud", type=int)
+    parser.add_argument("--config", default=CONFIG_FILE,
+                        help="Path to configuration JSON file (will be created if missing)")
+    parser.add_argument("--mesh-type", choices=["serial", "tcp"],
+                        help="Override the connection type from config")
+    parser.add_argument("--serial-port", help="Serial device path (for serial)")
+    parser.add_argument("--serial-baud", type=int, help="Serial baud rate")
+    parser.add_argument("--tcp-host", dest="tcp_host",
+                        help="TCP host for meshcore connection (tcp)")
+    parser.add_argument("--tcp-port", dest="tcp_port", type=int,
+                        help="TCP port for meshcore connection (tcp)")
     
     sub = parser.add_subparsers(dest="command")
     
@@ -412,8 +512,10 @@ async def main():
     p_send.add_argument("path", help="File/Dir path")
     
     p_recv = sub.add_parser("receive")
-    p_recv.add_argument("path", help="Save path")
+    p_recv.add_argument("path", help="Save path (directory or filename)")
     p_recv.add_argument("--overwrite", action="store_true")
+    p_recv.add_argument("--directory", action="store_true",
+                        help="Force treat the destination as a directory")
 
     sub.add_parser("status").add_argument("id", type=int)
     sub.add_parser("cancel").add_argument("id", type=int)
@@ -421,11 +523,18 @@ async def main():
     args = parser.parse_args()
 
     overrides = {}
-    if args.mesh_type: overrides["mesh_connection_type"] = args.mesh_type
-    if args.serial_port: overrides["mesh_serial_port"] = args.serial_port
-    if args.serial_baud: overrides["mesh_serial_baud"] = args.serial_baud
+    if args.mesh_type:
+        overrides["mesh_connection_type"] = args.mesh_type
+    if args.serial_port:
+        overrides["mesh_serial_port"] = args.serial_port
+    if args.serial_baud is not None:
+        overrides["mesh_serial_baud"] = args.serial_baud
+    if args.tcp_host:
+        overrides["mesh_tcp_host"] = args.tcp_host
+    if args.tcp_port is not None:
+        overrides["mesh_tcp_port"] = args.tcp_port
 
-    app = AkitaZmodemMeshCore(overrides)
+    app = AkitaZmodemMeshCore(overrides, config_file=args.config)
 
     # Clean Exit
     def sig_handler():
@@ -434,7 +543,13 @@ async def main():
     try: asyncio.get_running_loop().add_signal_handler(signal.SIGINT, sig_handler)
     except: pass
 
-    if not await app._connect_mesh(): return
+    if not await app._connect_mesh():
+        return
+
+    # start background processors in all modes; send-only operations will
+    # simply sit idle, but receive commands and the daemon depend on them.
+    asyncio.create_task(app._receive_loop_processor())
+    asyncio.create_task(app._timeout_check())
 
     cli_event = asyncio.Event()
 
@@ -447,8 +562,7 @@ async def main():
             await cli_event.wait()
 
         elif args.command == "receive":
-            # Auto-detect directory intention by path extension (or lack thereof)
-            is_dir = not args.path.endswith(('.zip','.bin','.txt','.dat','.jpg','.png','.py','.json'))
+            is_dir = getattr(args, "directory", False) or os.path.isdir(args.path)
             if is_dir:
                 await app.receive_directory(args.path, args.overwrite, cli_event)
             else:
@@ -462,11 +576,10 @@ async def main():
             app.cancel_transfer(args.id)
 
         else:
-            # Daemon
-            asyncio.create_task(app._receive_loop_processor())
-            asyncio.create_task(app._timeout_check())
+            # Daemon -- the work loops are already running above.  simply sleep
             logging.info(f"Daemon Listening. ID: {app.mesh} (Ctrl+C to stop)")
-            while app.running: await asyncio.sleep(1)
+            while app.running:
+                await asyncio.sleep(1)
 
     except asyncio.CancelledError: pass
     finally: await app.stop()

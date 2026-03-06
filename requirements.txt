@@ -6,9 +6,10 @@
 meshcore
 
 # For Zmodem protocol implementation
-# The script is written assuming a standard 'zmodem' library API.
-# Actual behavior depends on the specific library installed by this name.
-zmodem
+# A minimal implementation is bundled directly with the repository, so
+# there is no external dependency.  The ``zmodem`` import resolves to the
+# local module defined in the project root.
+# zmodem  # kept here as a reminder if a full-featured library is later desired
 
 tqdm
 
