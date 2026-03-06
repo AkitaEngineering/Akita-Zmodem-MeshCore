@@ -1,5 +1,3 @@
-import os
-import asyncio
 import pytest
 
 from akita_zmodem_meshcore import AkitaZmodemMeshCore, _safe_extract_zip
@@ -25,7 +23,8 @@ def test_validate_config_types(tmp_path):
 
 
 def test_safe_extract_zip_memory(tmp_path):
-    # a large zip with many entries should still be handled; just ensure no crash
+    # a large zip with many entries should still be handled; just ensure no
+    # crash
     zip_path = tmp_path / "many.zip"
     import zipfile
     with zipfile.ZipFile(str(zip_path), 'w') as z:
@@ -36,6 +35,7 @@ def test_safe_extract_zip_memory(tmp_path):
     _safe_extract_zip(str(zip_path), str(out))
     assert (out / 'file999.txt').exists()
 
+
 @pytest.mark.asyncio
 async def test_handle_zmodem_data_open_failure(tmp_path, monkeypatch):
     # Simulate failing to open file by making path a directory
@@ -45,6 +45,7 @@ async def test_handle_zmodem_data_open_failure(tmp_path, monkeypatch):
     tid = await app.receive_file(str(tmp_path), overwrite=True)
     # craft a fake payload that _handle_zmodem_data will accept
     # monkeypatch zmodem.Receiver to simple object
+
     class DummyRecv:
         def __init__(self, f): pass
         def receive(self, data): return b''
@@ -69,9 +70,11 @@ async def test_send_directory_skips_symlinks(tmp_path):
     app.mesh = object()
     # monkeypatch send_file to capture path of zip created
     called = {}
+
     async def fake_send(dest, path, cli_event=None):
         called['zip'] = path
-        if cli_event: cli_event.set()
+        if cli_event:
+            cli_event.set()
         return 1
     app.send_file = fake_send
     await app.send_directory('peer', str(d), None, cleanup=False)

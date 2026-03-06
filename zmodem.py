@@ -27,6 +27,7 @@ _END = b'E'
 
 # framing helpers: length prefix (uint32) + payload + crc32
 
+
 def _frame(payload: bytes) -> bytes:
     length = struct.pack("!I", len(payload))
     crc = struct.pack("!I", zlib.crc32(payload) & 0xFFFFFFFF)
@@ -44,7 +45,7 @@ def _deframe(buffer: bytearray):
         start = 4
         end = 4 + length
         payload = bytes(buffer[start:end])
-        crc_expected = struct.unpack("!I", buffer[end:end+4])[0]
+        crc_expected = struct.unpack("!I", buffer[end:end + 4])[0]
         crc_actual = zlib.crc32(payload) & 0xFFFFFFFF
         if crc_actual != crc_expected:
             # drop corrupted packet and continue; log for diagnostics
@@ -75,7 +76,8 @@ class Sender:
             return self._queue.pop(0)
         if self.state == 'init':
             # send START header
-            payload = _START + struct.pack("!H", len(self.filename)) + self.filename.encode('utf-8')
+            payload = _START + \
+                struct.pack("!H", len(self.filename)) + self.filename.encode('utf-8')
             payload += struct.pack("!Q", self.filesize)
             self._queue.append(_frame(payload))
             self.state = 'waiting_ack'
@@ -175,8 +177,8 @@ class Receiver:
             tp = payload[:1]
             if tp == _START:
                 name_len = struct.unpack("!H", payload[1:3])[0]
-                name = payload[3:3+name_len].decode('utf-8')
-                size = struct.unpack("!Q", payload[3+name_len:3+name_len+8])[0]
+                size = struct.unpack("!Q",
+                                     payload[3 + name_len:3 + name_len + 8])[0]
                 self.expected_size = size
                 # decide on resume
                 # Determine existing size from filepath (if available) or
@@ -203,21 +205,27 @@ class Receiver:
                     # close any previously opened handle
                     try:
                         if self.fobj:
-                            try: self.fobj.close()
-                            except Exception: pass
+                            try:
+                                self.fobj.close()
+                            except Exception:
+                                pass
                     except Exception:
                         pass
-                    self.fobj = open(target_name, 'ab') if target_name else None
+                    self.fobj = open(
+                        target_name, 'ab') if target_name else None
                     resp = _RESUME + struct.pack("!Q", self.offset)
                 else:
                     # start fresh: open for write (truncate)
                     try:
                         if self.fobj:
-                            try: self.fobj.close()
-                            except Exception: pass
+                            try:
+                                self.fobj.close()
+                            except Exception:
+                                pass
                     except Exception:
                         pass
-                    self.fobj = open(target_name, 'wb') if target_name else None
+                    self.fobj = open(
+                        target_name, 'wb') if target_name else None
                     self.offset = 0
                     resp = _ACK + struct.pack("!Q", self.offset)
                 out += _frame(resp)
@@ -234,7 +242,8 @@ class Receiver:
                     if self.fobj is None:
                         # attempt to open in append mode
                         try:
-                            self.fobj = open(self.filepath, 'ab') if self.filepath else None
+                            self.fobj = open(
+                                self.filepath, 'ab') if self.filepath else None
                         except Exception:
                             # cannot open file; request resume (no change)
                             resp = _RESUME + struct.pack("!Q", self.offset)

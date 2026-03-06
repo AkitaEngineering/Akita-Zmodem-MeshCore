@@ -1,4 +1,26 @@
 # Akita-Zmodem-MeshCore
+This repository contains a **Python implementation of a lightweight ZMODEM-like
+file transfer protocol** that is tightly integrated with the MeshCore mesh
+networking client.  The code is intended to be self‑contained, dependency‑free
+(other than MeshCore when used), and covered by an extensive unit test suite.
+
+## Development notes
+
+* The project follows **PEP 8** style; run `black`/`autopep8` or `flake8` in the
+  virtualenv before committing.  A `requirements-dev.txt` is provided for
+the linter and test runner.
+* Use `pytest` (with `pytest-asyncio`) to execute the tests.  Example:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+* All lint warnings have been cleared; contributions should remain free of
+  `E722`/`E701`/unused-imports etc.  `autopep8 --in-place` is handy for
+  bulk fixes.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 

@@ -1,6 +1,4 @@
 import asyncio
-import os
-import tempfile
 import zipfile
 import pytest
 
@@ -14,8 +12,8 @@ async def test_calculate_md5_runs_in_thread(tmp_path):
     data = b"abc123" * 10
     p.write_bytes(data)
 
-    # run calculate_md5 in a background thread via asyncio.to_thread and ensure result matches
-    loop = asyncio.get_running_loop()
+    # run calculate_md5 in a background thread via asyncio.to_thread and
+    # ensure result matches
     md = await asyncio.to_thread(calculate_md5, str(p))
 
     # verify known md5
