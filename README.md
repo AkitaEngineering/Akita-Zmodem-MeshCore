@@ -8,25 +8,26 @@ This utility is designed for asynchronous operation, making it suitable for envi
 
 ## Key Features
 
-* **Zmodem Protocol**: Implements Zmodem for reliable file transfers. (Full resumability depends on session state and Zmodem library capabilities).
-* **MeshCore Integration**: Adapted to utilize Python bindings for MeshCore networks (specifically targeting `fdlamotte/meshcore_py` or a compatible API).
-* **Asynchronous Operations**: Uses `asyncio` for non-blocking I/O, improving performance and responsiveness.
-* **File and Directory Transfer**: Supports sending and receiving individual files and entire directories (via zip archives).
-* **Timeout Handling**: Includes mechanisms to handle network interruptions and transfer timeouts.
-* **JSON Configuration**: Allows customization of settings (application port, mesh packet chunk sizes, timeouts, MeshCore connection details) via an `akita_zmodem_meshcore_config.json` file.
-* **Command-Line Interface (CLI)**: Provides a user-friendly CLI for initiating transfers, checking status, and canceling operations. CLI commands for send/receive now wait for transfer completion.
-* **Daemon Mode**: Can run as a background listener for incoming transfers.
-* **Status Reporting**: Offers detailed transfer status information.
-* **Transfer Cancellation**: Allows users to cancel active transfers.
-* **File Overwrite Protection**: Prevents accidental file overwrites unless specified.
-* **Logging**: Comprehensive logging for debugging and operational monitoring.
+* **Built‑in Zmodem Protocol**: A fully self‑contained, Z‑modem‑like implementation lives in `zmodem.py`, so there is no requirement to install an external Zmodem library. The code handles handshakes, CRC32 framing, resumable transfers, and per‑chunk port headers for reliable operation over the mesh.
+* **MeshCore Integration**: Uses Python bindings for MeshCore networks (tested with `fdlamotte/meshcore_py` but compatible with any API providing `MeshCore.create_*`, `mesh.subscribe`, and `mesh.commands.send_msg`).
+* **Async I/O with asyncio**: Non‑blocking operations keep transfers responsive even on poor links.
+* **File & Directory Support**: Send files directly or zip directories on‑the‑fly; received zips are automatically extracted.
+* **Chunk Header Handling**: Data sent over the mesh is split into `mesh_packet_chunk_size` fragments; each fragment begins with an application port header so the receiver can reassemble correctly.
+* **Configurable Timeouts**: Automatic cancellation of stalled transfers.
+* **JSON Configuration**: Tweak ports, chunk sizes, MeshCore connection params, and more via `akita_zmodem_meshcore_config.json` or CLI overrides.
+* **Robust CLI**: Commands (`send`, `receive`, `status`, `cancel`) either run as a one‑off or the script can operate as a long‑running daemon.
+* **Daemon Mode & Status**: Run as a listener and query active transfers.
+* **Cancellation & Safety**: Cancel mid‑transfer and protect against unwanted overwrites.
+* **Detailed Logging**: Built‑in logging at INFO/DEBUG levels aids debugging and monitoring.
 
 ## Important Note on Dependencies
 
-This version of Akita-Zmodem-MeshCore has been significantly refactored to work with modern asynchronous Python practices and specific libraries:
+Because the Zmodem protocol is implemented internally, the only mandatory third‑party dependency is the `meshcore` Python library (to communicate with a MeshCore radio).  You do **not** need to install any separate `zmodem` package; if one is present it will be ignored in favor of the built‑in implementation.
 
-* **MeshCore Python Library**: It is designed to work with a `meshcore` Python library compatible with the API used (e.g., `fdlamotte/meshcore_py`). You'll need a MeshCore device (like a LoRa radio flashed with MeshCore firmware) that this library can connect to (e.g., via Serial or TCP). The script expects methods like `MeshCore.create_serial()`, `mesh.subscribe()`, and `mesh.commands.send_msg()`.
-* **Zmodem Python Library**: It assumes a standard Python `zmodem` library is installed (`pip install zmodem`). The behavior of this utility is dependent on the specific API and blocking nature of the chosen Zmodem library. Blocking calls are wrapped to run in separate threads. The mock objects in the script provide a basic API contract if the library is missing.
+* **MeshCore Python Library** – must expose the basic API used here (`MeshCore.create_serial`/`create_tcp`, `mesh.subscribe`, `mesh.commands.send_msg`, etc.).  This library handles the low‑level radio/TCP transport.
+* **Optional**: `tqdm` for progress bars in CLI sessions (not required).  If absent, the program falls back to plain logging.
+
+All other functionality is self‑contained within the repository.
 
 ## Installation
 
@@ -65,10 +66,18 @@ This version of Akita-Zmodem-MeshCore has been significantly refactored to work 
 The utility is controlled via command-line arguments.
 
 ```bash
-python akita_zmodem_meshcore.py [CONNECTION_ARGS] [COMMAND] [COMMAND_ARGS]
+python akita_zmodem_meshcore.py [OPTIONS] [COMMAND] [COMMAND_ARGS]
 ```
 
-Global Connection Arguments (Optional, override config):
+Global Options (Optional, override config file):
+
+```
+--config <path>          Path to JSON configuration file (created if missing)
+--mesh-type [serial|tcp] Override connection type
+--serial-port <PORT_PATH> (e.g., /dev/ttyUSB0, COM3)
+--serial-baud <BAUDRATE>
+--tcp-host <HOST_IP_OR_NAME>
+--tcp-port <PORT_NUMBER>
 
 ```
 --mesh-type [serial|tcp]
@@ -98,8 +107,13 @@ python akita_zmodem_meshcore.py send <destination_node_id> <path/to/file_or_dir>
 Receive a file or directory:
 
 ```bash
-python akita_zmodem_meshcore.py receive <path/to/save_location> [--overwrite]
+python akita_zmodem_meshcore.py receive <path/to/save_location> [--overwrite] [--directory]
 ```
+
+* `--directory` forces the path to be treated as a directory even if it does not
+  yet exist or lacks a recognisable extension.  The utility will also infer
+  directory mode automatically when the target already exists and is a
+  directory.
 
 Note: For directory reception, provide the path where the directory's contents should be extracted.
 

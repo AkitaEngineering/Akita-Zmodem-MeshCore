@@ -5,11 +5,17 @@ This guide provides detailed information on how to use the Akita-Zmodem-MeshCore
 ## General Syntax
 
 ```bash
-python akita_zmodem_meshcore.py [CONNECTION_ARGS] [COMMAND] [COMMAND_ARGS]
+python akita_zmodem_meshcore.py [OPTIONS] [COMMAND] [COMMAND_ARGS]
 ```
 
-If no COMMAND is provided, the utility runs in daemon/listener mode, waiting for incoming transfers. When a command like `send` or `receive` is used from the CLI, the script will now wait for that specific operation to complete before exiting.
+The `--config` option may be used to point at a custom location for the JSON
+configuration file; the default is `akita_zmodem_meshcore_config.json`.
 
+
+If no COMMAND is provided, the utility runs in daemon/listener mode, waiting for incoming transfers. When a command like `send` or `receive` is used from the CLI, the script will now wait for that specific operation to complete before exiting.
+> **Note:** The Zmodem protocol is implemented internally, so you do not need
+to install any external Zmodem library.  All protocol state, retransmits, and
+resumes are handled by `zmodem.py` shipped in this repository.
 ---
 
 ## Connection Arguments
@@ -76,7 +82,7 @@ python akita_zmodem_meshcore.py send "NodeB_Name" /path/to/my_project_folder
 
 ---
 
-### 3. `receive <path> [--overwrite]`
+### 3. `receive <path> [--overwrite] [--directory]`
 
 Prepares the utility to receive an incoming file or directory and save it to the specified local path.
 
@@ -85,6 +91,8 @@ Prepares the utility to receive an incoming file or directory and save it to the
   - For a directory: Path to the local directory where the received zipped contents will be extracted.
 
 - `--overwrite` (optional): Overwrites existing files or directories if present.
+- `--directory` (optional): Force the given path to be considered a directory,
+  even if it does not yet exist or does not have a recognizable extension.
 
 **Examples:**
 
