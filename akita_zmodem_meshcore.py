@@ -36,6 +36,7 @@ except Exception:
 
 import zmodem
 import atexit
+import tempfile
 
 # global list for any temp zips created by any instance; cleaned at exit
 _temp_zip_files = []
@@ -49,6 +50,10 @@ def _cleanup_temp_zips():
             pass
 
 atexit.register(_cleanup_temp_zips)
+
+
+class UnsafeZipError(Exception):
+    """Raised when a zip archive contains unsafe member paths (ZipSlip)."""
 
 # Optional: TQDM for progress bars
 try:
@@ -159,13 +164,23 @@ def _safe_extract_zip(zip_path, extract_to):
             member = info.filename
             normalized = os.path.normpath(member)
             if normalized.startswith('..') or os.path.isabs(normalized):
-                raise Exception(f"Unsafe path in zip archive: {member}")
+                raise UnsafeZipError(f"Unsafe path in zip archive: {member}")
             dest_path = os.path.join(extract_to, normalized)
             abs_dest = os.path.abspath(dest_path)
             abs_base = os.path.abspath(extract_to)
             if not (abs_dest == abs_base or abs_dest.startswith(abs_base + os.sep)):
-                raise Exception(f"Zip would extract outside target: {member}")
-        z.extractall(extract_to)
+                raise UnsafeZipError(f"Zip would extract outside target: {member}")
+            # Ensure directory exists
+            parent = os.path.dirname(abs_dest)
+            if parent and not os.path.exists(parent):
+                os.makedirs(parent, exist_ok=True)
+            # If this is a directory entry, skip file write
+            if member.endswith('/') or info.is_dir():
+                continue
+            # Stream extract member content to avoid large memory use
+            with z.open(info, 'r') as src, open(abs_dest, 'wb') as dst:
+                for chunk in iter(lambda: src.read(8192), b''):
+                    dst.write(chunk)
 
 # -----------------------------------------------------------------------------
 # Core Class
@@ -419,15 +434,18 @@ class AkitaZmodemMeshCore:
         # scan transfers and, if this is a new incoming stream, initialize it
         for tid, t in list(self.transfers.items()):
             if t["state"] == "waiting":
+                # Do not pre-open the destination file (which could truncate
+                # it). Instead create a Receiver that manages its own file
+                # handle and resume detection based on the filepath.
                 t["dest"] = src
                 t["state"] = "receiving"
+                t["sync_f"] = None
                 try:
-                    t["sync_f"] = await asyncio.to_thread(open, t["file"], "wb")
+                    t["receiver"] = await asyncio.to_thread(zmodem.Receiver, t["file"])
                 except Exception as e:
-                    logging.error(f"[Rx-{tid}] Cannot open file '{t["file"]}': {e}")
+                    logging.error(f"[Rx-{tid}] Cannot init receiver for '{t['file']}': {e}")
                     self.cancel_transfer(tid)
                     continue
-                t["receiver"] = await asyncio.to_thread(zmodem.Receiver, t["sync_f"])
                 logging.info(f"[Rx-{tid}] Incoming stream from {src} accepted")
                 active_tid = tid
                 break
@@ -532,7 +550,10 @@ class AkitaZmodemMeshCore:
 
     async def receive_directory(self, path, overwrite, cli_event, cleanup=True):
         if not os.path.exists(path): os.makedirs(path)
-        zip_name = f"akita_recv_{int(time.time())}.zip"
+        # create a secure temporary file for the incoming zip to avoid
+        # predictable filenames and TOCTOU issues
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
+            zip_name = tf.name
         
         f_event = asyncio.Event()
         tid = await self.receive_file(zip_name, overwrite, f_event)
@@ -544,6 +565,8 @@ class AkitaZmodemMeshCore:
                 logging.info(f"Extracting to '{path}'...")
                 try:
                     await asyncio.to_thread(_safe_extract_zip, zip_name, path)
+                except UnsafeZipError as e:
+                    logging.error(f"Received zip rejected as unsafe: {e}")
                 except Exception as e:
                     logging.error(f"Failed to extract received zip '{zip_name}': {e}")
                 finally:
@@ -555,9 +578,42 @@ class AkitaZmodemMeshCore:
     def cancel_transfer(self, tid):
         if tid in self.transfers:
             t = self.transfers.pop(tid)
-            if t.get("sync_f"): 
-                try: t["sync_f"].close()
-                except: pass
+            # Close any file handles in a thread to avoid blocking the loop
+            if t.get("sync_f"):
+                try:
+                    f = t["sync_f"]
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None
+                    if loop and loop.is_running():
+                        # schedule a threaded close
+                        asyncio.create_task(asyncio.to_thread(f.close))
+                    else:
+                        try: f.close()
+                        except Exception: pass
+                except Exception:
+                    pass
+            # If receiver exists and holds an open file, close that safely
+            if t.get("receiver"):
+                try:
+                    rcv = t["receiver"]
+                    if hasattr(rcv, 'fobj') and rcv.fobj:
+                        try:
+                            loop = None
+                            try:
+                                loop = asyncio.get_running_loop()
+                            except RuntimeError:
+                                loop = None
+                            if loop and loop.is_running():
+                                asyncio.create_task(asyncio.to_thread(rcv.fobj.close))
+                            else:
+                                try: rcv.fobj.close()
+                                except Exception: pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             if t.get("cli_event"): 
                 t["cli_event"].set()
             return True

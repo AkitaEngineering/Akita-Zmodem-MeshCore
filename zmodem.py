@@ -16,6 +16,7 @@ should be sent back to the peer (control/ack frames).
 import os
 import struct
 import zlib
+import logging
 
 # packet types
 _START = b'S'      # <filename_len:uint16><filename><filesize:uint64>
@@ -46,7 +47,8 @@ def _deframe(buffer: bytearray):
         crc_expected = struct.unpack("!I", buffer[end:end+4])[0]
         crc_actual = zlib.crc32(payload) & 0xFFFFFFFF
         if crc_actual != crc_expected:
-            # drop corrupted packet and continue
+            # drop corrupted packet and continue; log for diagnostics
+            logging.debug("_deframe: CRC mismatch, dropping packet")
             del buffer[:4 + length + 4]
             continue
         yield payload
@@ -79,6 +81,11 @@ class Sender:
             self.state = 'waiting_ack'
             return self._queue.pop(0)
         if self.state == 'sending':
+            # ensure file position matches current offset
+            try:
+                self.fobj.seek(self.offset)
+            except Exception:
+                pass
             data = self.fobj.read(self.chunk_size)
             if not data:
                 self._queue.append(_frame(_END))
@@ -103,18 +110,30 @@ class Sender:
             tp = payload[:1]
             if tp == _ACK:
                 off = struct.unpack("!Q", payload[1:9])[0]
-                # remote acknowledges up to off; we will resume from there if needed
-                if off > self.offset:
-                    # sender has already passed that offset; ignore
-                    pass
-                else:
-                    # start sending data from offset
+                # remote acknowledges up to off; update our send offset to match
+                # and position the file accordingly. Clamp to valid range.
+                if off < 0:
+                    off = 0
+                if off > self.filesize:
+                    off = self.filesize
+                self.offset = off
+                try:
                     self.fobj.seek(self.offset)
+                except Exception:
+                    pass
                 self.state = 'sending'
             elif tp == _RESUME:
                 off = struct.unpack("!Q", payload[1:9])[0]
+                # Clamp resume offset to valid range before seeking
+                if off < 0:
+                    off = 0
+                if off > self.filesize:
+                    off = self.filesize
                 self.offset = off
-                self.fobj.seek(off)
+                try:
+                    self.fobj.seek(off)
+                except Exception:
+                    pass
                 self.state = 'sending'
             elif tp == _END:
                 self.state = 'finished'
@@ -124,8 +143,19 @@ class Sender:
 
 
 class Receiver:
-    def __init__(self, fobj):
-        self.fobj = fobj
+    def __init__(self, fobj_or_path):
+        """Accept either a file-like object or a filepath string.
+
+        If a path is provided, the Receiver will open/close the file as
+        appropriate during the transfer to support resume logic without the
+        caller pre-opening the file (which could truncate it).
+        """
+        if isinstance(fobj_or_path, str):
+            self.filepath = fobj_or_path
+            self.fobj = None
+        else:
+            self.filepath = None
+            self.fobj = fobj_or_path
         self._inbuf = bytearray()
         self._queue = []
         self.state = 'waiting'   # waiting for START header
@@ -149,17 +179,45 @@ class Receiver:
                 size = struct.unpack("!Q", payload[3+name_len:3+name_len+8])[0]
                 self.expected_size = size
                 # decide on resume
-                try:
-                    existing = os.path.getsize(self.fobj.name)
-                except OSError:
-                    existing = 0
+                # Determine existing size from filepath (if available) or
+                # from the provided file object.  If the caller previously
+                # opened the file with 'wb' we would have truncated it, so
+                # prefer using a filepath and letting Receiver manage opens
+                # to correctly support resume.
+                existing = 0
+                target_name = None
+                if self.filepath:
+                    target_name = self.filepath
+                elif self.fobj and hasattr(self.fobj, 'name'):
+                    target_name = self.fobj.name
+
+                if target_name:
+                    try:
+                        existing = os.path.getsize(target_name)
+                    except OSError:
+                        existing = 0
+
                 if existing and existing < size:
+                    # resume: open for append
                     self.offset = existing
-                    self.fobj = open(self.fobj.name, 'ab')
+                    # close any previously opened handle
+                    try:
+                        if self.fobj:
+                            try: self.fobj.close()
+                            except Exception: pass
+                    except Exception:
+                        pass
+                    self.fobj = open(target_name, 'ab') if target_name else None
                     resp = _RESUME + struct.pack("!Q", self.offset)
                 else:
-                    # start fresh
-                    self.fobj = open(self.fobj.name, 'wb')
+                    # start fresh: open for write (truncate)
+                    try:
+                        if self.fobj:
+                            try: self.fobj.close()
+                            except Exception: pass
+                    except Exception:
+                        pass
+                    self.fobj = open(target_name, 'wb') if target_name else None
                     self.offset = 0
                     resp = _ACK + struct.pack("!Q", self.offset)
                 out += _frame(resp)
@@ -172,13 +230,27 @@ class Receiver:
                     resp = _RESUME + struct.pack("!Q", self.offset)
                     out += _frame(resp)
                 else:
+                    # Ensure we have an open file handle before writing
+                    if self.fobj is None:
+                        # attempt to open in append mode
+                        try:
+                            self.fobj = open(self.filepath, 'ab') if self.filepath else None
+                        except Exception:
+                            # cannot open file; request resume (no change)
+                            resp = _RESUME + struct.pack("!Q", self.offset)
+                            out += _frame(resp)
+                            continue
                     self.fobj.write(chunk)
                     self.offset += len(chunk)
                     resp = _ACK + struct.pack("!Q", self.offset)
                     out += _frame(resp)
             elif tp == _END and self.state == 'receiving':
                 self.state = 'done'
-                self.fobj.close()
+                try:
+                    if self.fobj:
+                        self.fobj.close()
+                except Exception:
+                    pass
                 # final ack
                 out += _frame(_END)
         return out

@@ -20,10 +20,10 @@ Here's an explanation of each field in the configuration file:
     * **Type**: Integer  
     * **Default**: `256`
 
-* `"mesh_packet_chunk_size": 128`  
+* `"mesh_packet_chunk_size": 200`  
     * **Description**: The maximum size (in bytes) of the payload for a single packet sent over the MeshCore network. This is after the `zmodem_app_port` has been prepended. Zmodem protocol packets can be larger than what the underlying mesh radio can handle in one go. This setting defines how the utility should break down larger Zmodem protocol data units into smaller chunks suitable for the mesh.  
     * **Type**: Integer  
-    * **Default**: `128` (Adjust based on your MeshCore device's effective MTU and network conditions to avoid fragmentation by lower layers or packet loss).
+    * **Default**: `200` (Adjust based on your MeshCore device's effective MTU and network conditions to avoid fragmentation by lower layers or packet loss).
 
 * `"timeout": 60`  
     * **Description**: The duration (in seconds) of inactivity after which an ongoing transfer is considered timed-out and subsequently canceled. Activity is defined as successfully sending or receiving data chunks relevant to the Zmodem transfer.  

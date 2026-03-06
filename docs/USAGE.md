@@ -13,7 +13,9 @@ configuration file; the default is `akita_zmodem_meshcore_config.json`.
 
 
 If no COMMAND is provided, the utility runs in daemon/listener mode, waiting for incoming transfers. When a command like `send` or `receive` is used from the CLI, the script will now wait for that specific operation to complete before exiting.
-
+> **Note:** The Zmodem protocol is implemented internally, so you do not need
+to install any external Zmodem library.  All protocol state, retransmits, and
+resumes are handled by `zmodem.py` shipped in this repository.
 ---
 
 ## Connection Arguments
