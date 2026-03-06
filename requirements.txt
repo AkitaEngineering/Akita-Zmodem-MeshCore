@@ -5,14 +5,13 @@
 # (e.g., fdlamotte/meshcore_py or a similar asyncio-based library with 'create_serial', 'subscribe', 'commands.send_msg')
 meshcore
 
-# For Zmodem protocol implementation
-# A minimal implementation is bundled directly with the repository, so
-# there is no external dependency.  The ``zmodem`` import resolves to the
-# local module defined in the project root.
-# zmodem  # kept here as a reminder if a full-featured library is later desired
+# Zmodem: implemented in-tree (zmodem.py). No external `zmodem` package
+# is required for normal operation. If you need a full-featured third-party
+# implementation, install it explicitly and update this file.
+# zmodem  # optional
 
+# Optional, for CLI progress bars
 tqdm
 
-# CRC calculation, often a dependency for Zmodem implementations.
-# May be pulled in by 'zmodem' automatically, but listed for explicitness.
+# Optional: CRC utilities (not required unless using external zmodem libs)
 crcmod

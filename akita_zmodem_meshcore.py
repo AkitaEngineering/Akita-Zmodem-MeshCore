@@ -23,11 +23,32 @@ def check_dependency(module_name, pip_name):
         print(f"Please install it: pip install {pip_name}")
         sys.exit(1)
 
-# only validate meshcore; zmodem is implemented in-tree now
-check_dependency("meshcore", "meshcore")
+# Attempt to import MeshCore; allow module import even if the dependency
+# is not installed so tests and documentation can be generated.  If missing
+# the concrete `_connect_mesh` call will fail at runtime with a clear error.
+try:
+    from meshcore import MeshCore, EventType
+except Exception:
+    MeshCore = None
+    class EventType:
+        CONTACT_MSG_RECV = "contact_msg_recv"
+        ERROR = "error"
 
-from meshcore import MeshCore, EventType
 import zmodem
+import atexit
+
+# global list for any temp zips created by any instance; cleaned at exit
+_temp_zip_files = []
+
+def _cleanup_temp_zips():
+    for fp in list(_temp_zip_files):
+        try:
+            if os.path.exists(fp):
+                os.remove(fp)
+        except Exception:
+            pass
+
+atexit.register(_cleanup_temp_zips)
 
 # Optional: TQDM for progress bars
 try:
@@ -112,12 +133,39 @@ TIMEOUT = None
 TX_DELAY_S = None
 
 def calculate_md5(filepath):
-    """Calculates MD5 checksum of a file for integrity verification."""
+    """Calculates MD5 checksum of a file for integrity verification.
+
+    This is a blocking operation and should generally be executed in a
+    background thread (e.g. via ``asyncio.to_thread``) when called from an
+    async context.
+    """
     hash_md5 = hashlib.md5()
     with open(filepath, "rb") as f:
         for chunk in iter(lambda: f.read(4096), b""):
             hash_md5.update(chunk)
     return hash_md5.hexdigest()
+
+
+def _safe_extract_zip(zip_path, extract_to):
+    """Safely extract a zip file into `extract_to` preventing ZipSlip.
+
+    Streams entry names to avoid loading an entire name list into memory.
+    Raises an Exception if any member would extract outside `extract_to`.
+    """
+    import zipfile, os
+
+    with zipfile.ZipFile(zip_path, 'r') as z:
+        for info in z.infolist():
+            member = info.filename
+            normalized = os.path.normpath(member)
+            if normalized.startswith('..') or os.path.isabs(normalized):
+                raise Exception(f"Unsafe path in zip archive: {member}")
+            dest_path = os.path.join(extract_to, normalized)
+            abs_dest = os.path.abspath(dest_path)
+            abs_base = os.path.abspath(extract_to)
+            if not (abs_dest == abs_base or abs_dest.startswith(abs_base + os.sep)):
+                raise Exception(f"Zip would extract outside target: {member}")
+        z.extractall(extract_to)
 
 # -----------------------------------------------------------------------------
 # Core Class
@@ -129,11 +177,17 @@ class AkitaZmodemMeshCore:
         self.transfer_id_counter = 0
         self.running = True
         self._mesh_receive_queue = asyncio.Queue()
+        self._temp_zips = []  # track temp archives for cleanup
+        # register instance temp files in global list for atexit cleanup
+        def _register(fp):
+            _temp_zip_files.append(fp)
+        self._register_temp = _register
 
         base = load_config(config_file)
         self.app_config = base.copy()
         if cli_config_overrides:
             self.app_config.update(cli_config_overrides)
+        self._validate_config()
 
         # compute frequently-used values once per instance
         self.zmodem_app_port = self.app_config.get("zmodem_app_port", DEFAULT_CONFIG["zmodem_app_port"])
@@ -153,8 +207,29 @@ class AkitaZmodemMeshCore:
         self.transfer_id_counter += 1
         return self.transfer_id_counter
 
+    def _validate_config(self):
+        # ensure numeric configuration values are of the expected type
+        fields = [
+            ("zmodem_app_port", int),
+            ("mesh_packet_chunk_size", int),
+            ("timeout", (int, float)),
+            ("tx_delay_ms", (int, float)),
+        ]
+        for key, typ in fields:
+            val = self.app_config.get(key)
+            if val is not None and not isinstance(val, typ):
+                raise ValueError(f"Configuration key '{key}' must be {typ}, got {type(val)}")
+            if key in ("mesh_packet_chunk_size", "timeout") and val is not None:
+                if val <= 0:
+                    raise ValueError(f"{key} must be positive")
+
     async def _connect_mesh(self):
         conn_type = self.app_config.get("mesh_connection_type", "serial")
+        # Fail fast with a clear exception when the meshcore Python client
+        # is not available. The module import is optional for documentation
+        # and testing, but actual operation requires the client.
+        if MeshCore is None:
+            raise RuntimeError("MeshCore Python client is not installed; install via 'pip install meshcore' or provide a compatible library.")
         try:
             if conn_type == "serial":
                 port = self.app_config.get("mesh_serial_port")
@@ -204,6 +279,14 @@ class AkitaZmodemMeshCore:
         if not self.mesh:
             if cli_event: cli_event.set()
             return None
+        if os.path.isdir(filepath):
+            logging.error(f"Path '{filepath}' is a directory, not a file")
+            if cli_event: cli_event.set()
+            return None
+        if not isinstance(dest_node, str) or not dest_node:
+            logging.error(f"Invalid destination node: {dest_node}")
+            if cli_event: cli_event.set()
+            return None
 
         if not os.path.exists(filepath):
             logging.error(f"File not found: {filepath}")
@@ -212,7 +295,8 @@ class AkitaZmodemMeshCore:
 
         tid = self.generate_transfer_id()
         fsize = os.path.getsize(filepath)
-        checksum = calculate_md5(filepath)
+        # calculate checksum in a thread to avoid blocking the event loop
+        checksum = await asyncio.to_thread(calculate_md5, filepath)
         
         logging.info(f"[Tx-{tid}] File: {os.path.basename(filepath)} | Size: {fsize:,} bytes | MD5: {checksum}")
 
@@ -260,13 +344,19 @@ class AkitaZmodemMeshCore:
 
                 if packet:
                     logging.debug(f"[Tx-{tid}] next packet size {len(packet)} state={sender.state}")
-                    # Construct Payload: [PORT HEADER] + [ZMODEM DATA]
-                    full_payload = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port) + packet
-                    
-                    # Chunking
-                    chunk_len = len(full_payload)
-                    for i in range(0, chunk_len, self.mesh_packet_chunk_size):
-                        chunk = full_payload[i:i + self.mesh_packet_chunk_size]
+                    # Construct ZMODEM packet once (packet includes framing)
+                    header = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port)
+                    remaining = packet
+
+                    # Chunking: ensure each chunk begins with header so receiver can
+                    # unconditionally strip it.  We account for header size when
+                    # slicing the payload portion so chunks stay within the
+                    # configured mesh_packet_chunk_size.
+                    max_payload = self.mesh_packet_chunk_size - len(header)
+                    while remaining:
+                        piece = remaining[:max_payload]
+                        remaining = remaining[len(piece):]
+                        chunk = header + piece
                         try:
                             logging.debug(f"[Tx-{tid}] sending chunk {len(chunk)}")
                             await self.mesh.commands.send_msg(destination=dest, payload=chunk)
@@ -326,52 +416,48 @@ class AkitaZmodemMeshCore:
 
     async def _handle_zmodem_data(self, src, data):
         active_tid = None
-        
-        # Match incoming packet to transfer
-        for tid, t in self.transfers.items():
+        # scan transfers and, if this is a new incoming stream, initialize it
+        for tid, t in list(self.transfers.items()):
             if t["state"] == "waiting":
                 t["dest"] = src
                 t["state"] = "receiving"
-                t["sync_f"] = await asyncio.to_thread(open, t["file"], "wb")
+                try:
+                    t["sync_f"] = await asyncio.to_thread(open, t["file"], "wb")
+                except Exception as e:
+                    logging.error(f"[Rx-{tid}] Cannot open file '{t["file"]}': {e}")
+                    self.cancel_transfer(tid)
+                    continue
                 t["receiver"] = await asyncio.to_thread(zmodem.Receiver, t["sync_f"])
                 logging.info(f"[Rx-{tid}] Incoming stream from {src} accepted")
                 active_tid = tid
                 break
-            elif t["state"] == "receiving" and t["dest"] == src:
+            elif t["state"] == "receiving" and t.get("dest") == src:
                 active_tid = tid
                 break
             elif t["state"] == "sending" and t.get("dest") == src:
-                # control data for a sending transfer (e.g. ACK/resume)
                 active_tid = tid
                 break
-        
-        if not active_tid: return
-
+        if not active_tid:
+            return
         t = self.transfers[active_tid]
         t["last_act"] = time.time()
 
-        # data may need to be delivered to either receiver or sender depending on state
         if t["state"] == "receiving":
             receiver = t["receiver"]
-
             try:
-                # Feed Zmodem Receiver with the raw data chunk; the receiver
-                # object maintains its own internal buffer so we don't need to
-                # aggregate across mesh packets.  Log the size for debugging
                 logging.debug(f"[Rx-{active_tid}] delivering {len(data)} bytes to receiver")
                 resp = await asyncio.to_thread(receiver.receive, data)
                 t["bytes"] += len(data)
                 logging.debug(f"[Rx-{active_tid}] receiver state={receiver.state} resp_len={len(resp) if resp else 0}")
 
                 if resp:
-                    # send response immediately back to source (include header)
                     resp_payload = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port) + resp
                     logging.debug(f"[Rx-{active_tid}] sending {len(resp)} bytes back")
                     await self.mesh.commands.send_msg(destination=src, payload=resp_payload)
 
                 if await asyncio.to_thread(receiver.is_finished):
                     logging.info(f"[Rx-{active_tid}] Transfer Complete.")
-                    checksum = calculate_md5(t["file"])
+                    checksum = await asyncio.to_thread(calculate_md5, t["file"])
                     logging.info(f"[Rx-{active_tid}] File Saved. MD5: {checksum}")
                     self.cancel_transfer(active_tid)
             except Exception as e:
@@ -379,22 +465,19 @@ class AkitaZmodemMeshCore:
                 self.cancel_transfer(active_tid)
 
         elif t["state"] == "sending" and t.get("sender"):
-            # incoming control data for the sender side
             try:
                 logging.debug(f"[Tx-{active_tid}] delivering {len(data)} bytes to sender")
                 resp = await asyncio.to_thread(t["sender"].receive, data)
                 logging.debug(f"[Tx-{active_tid}] sender returned {len(resp) if resp else 0} bytes")
                 if resp:
-                    # wrap with port header
                     resp_payload = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port) + resp
                     await self.mesh.commands.send_msg(destination=src, payload=resp_payload)
             except Exception as e:
                 logging.error(f"[Tx-{active_tid}] Protocol error: {e}")
-
     # -------------------------------------------------------------------------
     # Directory Handling & Management
     # -------------------------------------------------------------------------
-    async def send_directory(self, dest, path, cli_event):
+    async def send_directory(self, dest, path, cli_event, cleanup=True):
         # create temporary zip file in system temp directory to avoid cluttering
         # the working directory; the file is deleted when the transfer finishes
         # (or on error).
@@ -409,6 +492,10 @@ class AkitaZmodemMeshCore:
                 for root, _, files in os.walk(path):
                     for file in files:
                         p = os.path.join(root, file)
+                        # skip symlinks to avoid unintentionally archiving system paths
+                        if os.path.islink(p):
+                            logging.debug(f"Skipping symlink {p} in directory transfer")
+                            continue
                         z.write(p, os.path.relpath(p, path))
 
         try:
@@ -433,33 +520,36 @@ class AkitaZmodemMeshCore:
                 await f_event.wait()
         finally:
             # Ensure the temporary zip is removed where possible
-            try:
-                if os.path.exists(zip_name):
-                    os.remove(zip_name)
-            except Exception as e:
-                logging.warning(f"Failed to remove temp zip '{zip_name}': {e}")
+            if cleanup:
+                try:
+                    if os.path.exists(zip_name):
+                        os.remove(zip_name)
+                except Exception as e:
+                    logging.warning(f"Failed to remove temp zip '{zip_name}': {e}")
             if cli_event:
                 try: cli_event.set()
                 except Exception: pass
 
-    async def receive_directory(self, path, overwrite, cli_event):
+    async def receive_directory(self, path, overwrite, cli_event, cleanup=True):
         if not os.path.exists(path): os.makedirs(path)
         zip_name = f"akita_recv_{int(time.time())}.zip"
         
         f_event = asyncio.Event()
         tid = await self.receive_file(zip_name, overwrite, f_event)
-        
         if tid:
+            self._temp_zips.append(zip_name)
+            self._register_temp(zip_name)
             await f_event.wait()
             if os.path.exists(zip_name):
                 logging.info(f"Extracting to '{path}'...")
                 try:
-                    await asyncio.to_thread(lambda: zipfile.ZipFile(zip_name, 'r').extractall(path))
+                    await asyncio.to_thread(_safe_extract_zip, zip_name, path)
                 except Exception as e:
                     logging.error(f"Failed to extract received zip '{zip_name}': {e}")
                 finally:
-                    try: os.remove(zip_name)
-                    except: pass
+                    if cleanup:
+                        try: os.remove(zip_name)
+                        except: pass
         if cli_event: cli_event.set()
 
     def cancel_transfer(self, tid):
@@ -543,7 +633,11 @@ async def main():
     try: asyncio.get_running_loop().add_signal_handler(signal.SIGINT, sig_handler)
     except: pass
 
-    if not await app._connect_mesh():
+    try:
+        if not await app._connect_mesh():
+            return
+    except Exception as e:
+        logging.error(f"Failed to connect to mesh: {e}")
         return
 
     # start background processors in all modes; send-only operations will
