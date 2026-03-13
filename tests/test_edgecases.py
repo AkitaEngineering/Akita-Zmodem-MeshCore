@@ -47,7 +47,8 @@ async def test_handle_zmodem_data_open_failure(tmp_path, monkeypatch):
     # monkeypatch zmodem.Receiver to simple object
 
     class DummyRecv:
-        def __init__(self, f): pass
+        def __init__(self, f):
+            raise IsADirectoryError(f"Is a directory: '{f}'")
         def receive(self, data): return b''
         def is_finished(self): return False
     monkeypatch.setattr('zmodem.Receiver', DummyRecv)

@@ -53,6 +53,11 @@ def setup_env(tmp_path, monkeypatch):
         Receiver=mock_receiver_factory)
     monkeypatch.setitem(sys.modules, 'zmodem', mock_zmod)
 
+    # Also patch the already-imported reference in akita_zmodem_meshcore so
+    # that calls like ``zmodem.Sender(...)`` inside the module use the mock.
+    import akita_zmodem_meshcore
+    monkeypatch.setattr(akita_zmodem_meshcore, 'zmodem', mock_zmod)
+
     yield
 
     # teardown

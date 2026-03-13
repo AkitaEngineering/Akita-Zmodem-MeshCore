@@ -8,8 +8,24 @@ networking client.  The code is intended to be self‑contained, dependency‑fr
 
 * The project follows **PEP 8** style; run `black`/`autopep8` or `flake8` in the
   virtualenv before committing.  A `requirements-dev.txt` is provided for
-the linter and test runner.
-* Use `pytest` (with `pytest-asyncio`) to execute the tests.  Example:
+  the linter and test runner.
+* Use `pytest` (with `pytest-asyncio`) to execute the tests. The test harness
+  used in CI also relies on `pytest-timeout` to prevent hanging tests; it's
+  included in `requirements-dev.txt`.
+
+Running tests (recommended workflow):
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements-dev.txt
+pytest -v
+```
+
+If tests hang locally, `pytest-timeout` enforces per-test time limits; you can
+adjust timeouts via `--timeout=<seconds>` when invoking `pytest`.
+
 
 ```bash
 python -m venv .venv

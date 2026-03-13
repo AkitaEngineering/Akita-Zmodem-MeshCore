@@ -140,6 +140,54 @@ The utility will attempt to stop the transfer and clean up associated resources.
 
 ---
 
+## Development & Testing
+
+This project includes a fast unit test suite that runs locally and in CI. To run
+the tests locally, create and activate a virtual environment, install the
+development requirements and run `pytest`:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements-dev.txt
+pytest -v
+```
+
+The `requirements-dev.txt` includes `pytest-asyncio` and `pytest-timeout` to
+support async tests and to prevent hanging tests in CI. Use `--timeout=<sec>`
+to override the default per-test timeout when needed.
+
+## Examples: MeshCore Connection & Setup
+
+This section gives concrete examples for common deployment scenarios.
+
+Serial (USB radio)
+
+```bash
+# Use the system config file or override on the CLI:
+python akita_zmodem_meshcore.py --mesh-type serial --serial-port /dev/ttyUSB0 --serial-baud 115200
+```
+
+Tips:
+- If you get `PermissionError: [Errno 13]`, add your user to the `dialout`
+  group on Linux and re-login (`sudo usermod -aG dialout $USER`).
+- Check `dmesg` after plugging the radio to discover the device node.
+
+TCP bridge
+
+```bash
+# When using a remote MeshCore TCP bridge
+python akita_zmodem_meshcore.py --mesh-type tcp --tcp-host 192.168.1.50 --tcp-port 4403
+```
+
+Tips:
+- Validate connectivity with `nc -vz 192.168.1.50 4403`.
+- Ensure any MeshCore daemon on the remote host speaks the expected
+  protocol for the Python MeshCore client used.
+
+
+
 ## Notes on Operation
 
 - **Node IDs**: The `<destination_node_id>` used in the `send` command must be a valid identifier recognized by your MeshCore setup (e.g. `!aabbccdd`, public key, or name).

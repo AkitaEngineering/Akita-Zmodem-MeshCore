@@ -48,15 +48,23 @@ class MockSender:
 
 
 class MockReceiver:
-    def __init__(self, fobj):
-        self.fobj = fobj
+    def __init__(self, fobj_or_path):
+        if isinstance(fobj_or_path, str):
+            self.filepath = fobj_or_path
+            self.fobj = open(fobj_or_path, 'wb')
+        else:
+            self.filepath = None
+            self.fobj = fobj_or_path
         self._finished = False
 
     def receive(self, data):
-        # append bytes to file
-        if data:
+        if data and self.fobj:
             self.fobj.write(data)
         self._finished = True
+        if self.fobj:
+            self.fobj.close()
+            self.fobj = None
+        return b""
 
     def is_finished(self):
         return self._finished
