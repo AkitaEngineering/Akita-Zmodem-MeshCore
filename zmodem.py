@@ -18,6 +18,8 @@ import struct
 import zlib
 import logging
 
+MAX_FRAME_PAYLOAD = 1024 * 1024
+
 # packet types
 _START = b'S'      # <filename_len:uint16><filename><filesize:uint64>
 _DATA = b'D'       # <offset:uint64><payload>
@@ -26,6 +28,7 @@ _RESUME = b'R'     # <offset:uint64>
 _END = b'E'
 
 # framing helpers: length prefix (uint32) + payload + crc32
+
 
 def _frame(payload: bytes) -> bytes:
     length = struct.pack("!I", len(payload))
@@ -39,12 +42,18 @@ def _deframe(buffer: bytearray):
         if len(buffer) < 4:
             break
         length = struct.unpack("!I", buffer[:4])[0]
+        if length > MAX_FRAME_PAYLOAD:
+            logging.warning(
+                "_deframe: oversized packet length %d, clearing buffer",
+                length)
+            buffer.clear()
+            break
         if len(buffer) < 4 + length + 4:
             break
         start = 4
         end = 4 + length
         payload = bytes(buffer[start:end])
-        crc_expected = struct.unpack("!I", buffer[end:end+4])[0]
+        crc_expected = struct.unpack("!I", buffer[end:end + 4])[0]
         crc_actual = zlib.crc32(payload) & 0xFFFFFFFF
         if crc_actual != crc_expected:
             # drop corrupted packet and continue; log for diagnostics
@@ -75,7 +84,8 @@ class Sender:
             return self._queue.pop(0)
         if self.state == 'init':
             # send START header
-            payload = _START + struct.pack("!H", len(self.filename)) + self.filename.encode('utf-8')
+            payload = _START + \
+                struct.pack("!H", len(self.filename)) + self.filename.encode('utf-8')
             payload += struct.pack("!Q", self.filesize)
             self._queue.append(_frame(payload))
             self.state = 'waiting_ack'
@@ -109,6 +119,9 @@ class Sender:
         for payload in _deframe(self._inbuf):
             tp = payload[:1]
             if tp == _ACK:
+                if len(payload) < 9:
+                    logging.debug("Sender.receive: short ACK frame ignored")
+                    continue
                 off = struct.unpack("!Q", payload[1:9])[0]
                 # remote acknowledges up to off; update our send offset to match
                 # and position the file accordingly. Clamp to valid range.
@@ -123,6 +136,9 @@ class Sender:
                     pass
                 self.state = 'sending'
             elif tp == _RESUME:
+                if len(payload) < 9:
+                    logging.debug("Sender.receive: short RESUME frame ignored")
+                    continue
                 off = struct.unpack("!Q", payload[1:9])[0]
                 # Clamp resume offset to valid range before seeking
                 if off < 0:
@@ -174,9 +190,15 @@ class Receiver:
         for payload in _deframe(self._inbuf):
             tp = payload[:1]
             if tp == _START:
+                if len(payload) < 11:
+                    logging.debug("Receiver.receive: short START frame ignored")
+                    continue
                 name_len = struct.unpack("!H", payload[1:3])[0]
-                name = payload[3:3+name_len].decode('utf-8')
-                size = struct.unpack("!Q", payload[3+name_len:3+name_len+8])[0]
+                if len(payload) < 3 + name_len + 8:
+                    logging.debug("Receiver.receive: truncated START frame ignored")
+                    continue
+                size = struct.unpack("!Q",
+                                     payload[3 + name_len:3 + name_len + 8])[0]
                 self.expected_size = size
                 # decide on resume
                 # Determine existing size from filepath (if available) or
@@ -200,29 +222,52 @@ class Receiver:
                 if existing and existing < size:
                     # resume: open for append
                     self.offset = existing
-                    # close any previously opened handle
-                    try:
-                        if self.fobj:
-                            try: self.fobj.close()
-                            except Exception: pass
-                    except Exception:
-                        pass
-                    self.fobj = open(target_name, 'ab') if target_name else None
+                    if target_name:
+                        # close any previously opened handle
+                        try:
+                            if self.fobj:
+                                try:
+                                    self.fobj.close()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        self.fobj = open(target_name, 'ab')
+                    elif self.fobj:
+                        try:
+                            self.fobj.seek(self.offset)
+                        except Exception:
+                            pass
                     resp = _RESUME + struct.pack("!Q", self.offset)
                 else:
                     # start fresh: open for write (truncate)
-                    try:
-                        if self.fobj:
-                            try: self.fobj.close()
-                            except Exception: pass
-                    except Exception:
-                        pass
-                    self.fobj = open(target_name, 'wb') if target_name else None
+                    if target_name:
+                        try:
+                            if self.fobj:
+                                try:
+                                    self.fobj.close()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        self.fobj = open(target_name, 'wb')
+                    elif self.fobj:
+                        try:
+                            self.fobj.seek(0)
+                        except Exception:
+                            pass
+                        try:
+                            self.fobj.truncate(0)
+                        except Exception:
+                            pass
                     self.offset = 0
                     resp = _ACK + struct.pack("!Q", self.offset)
                 out += _frame(resp)
                 self.state = 'receiving'
             elif tp == _DATA and self.state == 'receiving':
+                if len(payload) < 9:
+                    logging.debug("Receiver.receive: short DATA frame ignored")
+                    continue
                 off = struct.unpack("!Q", payload[1:9])[0]
                 chunk = payload[9:]
                 if off != self.offset:
@@ -232,9 +277,13 @@ class Receiver:
                 else:
                     # Ensure we have an open file handle before writing
                     if self.fobj is None:
+                        if not self.filepath:
+                            resp = _RESUME + struct.pack("!Q", self.offset)
+                            out += _frame(resp)
+                            continue
                         # attempt to open in append mode
                         try:
-                            self.fobj = open(self.filepath, 'ab') if self.filepath else None
+                            self.fobj = open(self.filepath, 'ab')
                         except Exception:
                             # cannot open file; request resume (no change)
                             resp = _RESUME + struct.pack("!Q", self.offset)

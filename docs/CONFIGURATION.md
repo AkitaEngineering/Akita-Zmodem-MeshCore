@@ -73,4 +73,87 @@ If your config file specifies serial connection, but you want to use TCP for one
 python akita_zmodem_meshcore.py --mesh-type tcp --tcp-host 192.168.1.50 --tcp-port 6500 send "!NodeAlpha" /myfiles/data.bin
 ```
 
+## Examples: Real MeshCore Setups
+
+Below are example configuration snippets and operational notes for common
+MeshCore setups. These are practical starting points — adapt values to your
+local network and device.
+
+1) Serial-connected MeshCore (USB radio)
+
+```json
+{
+    "mesh_connection_type": "serial",
+    "mesh_serial_port": "/dev/ttyUSB0",
+    "mesh_serial_baud": 115200,
+    "zmodem_app_port": 2001,
+    "mesh_packet_chunk_size": 200
+}
+```
+
+Notes:
+- Ensure the user running the script has read/write access to the serial
+    device (e.g., member of the `dialout` group on many Linux systems).
+- Confirm the device node with `ls -l /dev/ttyUSB0` (or the appropriate
+    device path). If using a USB-to-serial adapter, the device name may differ
+    (e.g., `/dev/ttyACM0`).
+
+2) TCP bridge to a MeshCore daemon (remote or local)
+
+If your MeshCore device is exposed over TCP (for example via a bridge or a
+daemon on a gateway machine), use the TCP connection type:
+
+```json
+{
+    "mesh_connection_type": "tcp",
+    "mesh_tcp_host": "192.168.1.100",
+    "mesh_tcp_port": 4403,
+    "zmodem_app_port": 2001,
+    "mesh_packet_chunk_size": 200
+}
+```
+
+Notes:
+- Make sure the host/port are reachable from the machine running
+    `akita_zmodem_meshcore.py` (test with `nc`/`telnet` or `ss`/`netcat`).
+- The MeshCore Python client (the library that exposes `MeshCore.create_tcp`)
+    must speak the same protocol as the remote service.
+
+3) Example `systemd` unit (daemon mode)
+
+Create `/etc/systemd/system/akita-zmodem.service`:
+
+```ini
+[Unit]
+Description=Akita Zmodem MeshCore daemon
+After=network.target
+
+[Service]
+User=akita
+Group=akita
+WorkingDirectory=/opt/akita/akita-zmodem
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/akita/venv/bin/python /opt/akita/akita-zmodem-meshcore/akita_zmodem_meshcore.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Adjust `User`, `WorkingDirectory`, and `ExecStart` to match your install. Use
+`sudo systemctl daemon-reload && sudo systemctl enable --now akita-zmodem` to
+start and enable the service.
+
+4) Troubleshooting
+
+- Serial permission denied: ensure the running user belongs to the group that
+    owns the serial device (e.g., `sudo usermod -aG dialout $USER`).
+- Wrong device: check dmesg output after plugging the radio to find the
+    correct `/dev/tty*` node.
+- TCP connection refused: verify the bridge/daemon is listening on the given
+    host/port and there are no firewall rules blocking access.
+- Fragmentation or errors: reduce `mesh_packet_chunk_size` to accommodate a
+    smaller MTU on your radio link; conservative defaults are 200 bytes.
+
+
 This command will attempt to connect via TCP to 192.168.1.50 on port 6500, overriding any serial settings in `akita_zmodem_meshcore_config.json` for this specific execution.
