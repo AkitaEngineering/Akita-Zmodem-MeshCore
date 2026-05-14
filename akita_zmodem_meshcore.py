@@ -78,14 +78,15 @@ except Exception:
 # Configuration & Constants
 # -----------------------------------------------------------------------------
 CONFIG_FILE = "akita_zmodem_meshcore_config.json"
+MESHCORE_MAX_PACKET_PAYLOAD = 184
 DEFAULT_CONFIG = {
     "zmodem_app_port": 2001,
     # "chunk_size" is included for completeness but is unused by the
     # current implementation; some third‑party zmodem wrappers expose a
     # chunk size parameter so we keep the value here for compatibility.
     "chunk_size": 256,             # Internal Zmodem buffer size (unused)
-    # Max payload per mesh packet (LoRa MTU safe)
-    "mesh_packet_chunk_size": 200,
+    # Max payload per mesh packet including the app-port header.
+    "mesh_packet_chunk_size": MESHCORE_MAX_PACKET_PAYLOAD,
     "timeout": 120,                # Extended timeout for slow links
     "mesh_connection_type": "serial",
     "mesh_serial_port": "/dev/ttyUSB0",
@@ -264,6 +265,14 @@ class AkitaZmodemMeshCore:
                     "timeout") and val is not None:
                 if val <= 0:
                     raise ValueError(f"{key} must be positive")
+        chunk_size = self.app_config.get("mesh_packet_chunk_size")
+        if chunk_size is not None:
+            if chunk_size <= APP_PORT_HEADER_SIZE:
+                raise ValueError(
+                    "mesh_packet_chunk_size must exceed the app-port header size")
+            if chunk_size > MESHCORE_MAX_PACKET_PAYLOAD:
+                raise ValueError(
+                    f"mesh_packet_chunk_size must be <= {MESHCORE_MAX_PACKET_PAYLOAD}")
 
     async def _connect_mesh(self):
         conn_type = self.app_config.get("mesh_connection_type", "serial")

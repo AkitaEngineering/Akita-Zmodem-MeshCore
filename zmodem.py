@@ -71,6 +71,7 @@ class Sender:
         self.filesize = os.fstat(fobj.fileno()).st_size
         self.filename = os.path.basename(fobj.name)
         self.offset = 0
+        self.acked_offset = 0
         self._finished = False
         self._queue = []      # outgoing packet queue
         self._inbuf = bytearray()
@@ -123,28 +124,42 @@ class Sender:
                     logging.debug("Sender.receive: short ACK frame ignored")
                     continue
                 off = struct.unpack("!Q", payload[1:9])[0]
-                # remote acknowledges up to off; update our send offset to match
-                # and position the file accordingly. Clamp to valid range.
+                # remote acknowledges up to off. Duplicate delivery is common
+                # on MeshCore routes, so ignore anything older than the last
+                # confirmed offset.
                 if off < 0:
                     off = 0
                 if off > self.filesize:
                     off = self.filesize
-                self.offset = off
-                try:
-                    self.fobj.seek(self.offset)
-                except Exception:
-                    pass
+                if off < self.acked_offset:
+                    logging.debug(
+                        "Sender.receive: stale ACK ignored (off=%d acked=%d)",
+                        off, self.acked_offset)
+                    continue
+                self.acked_offset = off
+                if off > self.offset:
+                    self.offset = off
+                    try:
+                        self.fobj.seek(self.offset)
+                    except Exception:
+                        pass
                 self.state = 'sending'
             elif tp == _RESUME:
                 if len(payload) < 9:
                     logging.debug("Sender.receive: short RESUME frame ignored")
                     continue
                 off = struct.unpack("!Q", payload[1:9])[0]
-                # Clamp resume offset to valid range before seeking
+                # Clamp resume offset to valid range before seeking. Ignore
+                # resume requests that predate already-acknowledged progress.
                 if off < 0:
                     off = 0
                 if off > self.filesize:
                     off = self.filesize
+                if off < self.acked_offset:
+                    logging.debug(
+                        "Sender.receive: stale RESUME ignored (off=%d acked=%d)",
+                        off, self.acked_offset)
+                    continue
                 self.offset = off
                 try:
                     self.fobj.seek(off)

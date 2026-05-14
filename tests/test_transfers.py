@@ -429,6 +429,37 @@ def test_zmodem_sender_ignores_short_ack_frame(tmp_path):
     assert sender.state == 'init'
 
 
+def test_zmodem_sender_ignores_stale_ack_and_resume(tmp_path):
+    src = tmp_path / "orig5.bin"
+    src.write_bytes(b"0123456789abcdef")
+
+    import importlib.util
+    import os
+    spec = importlib.util.spec_from_file_location(
+        'builtin_zmodem', os.path.join(os.getcwd(), 'zmodem.py'))
+    zm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(zm)
+    Sender = zm.Sender
+
+    with open(src, "rb") as sf:
+        sender = Sender(sf, chunk_size=4)
+        sender.get_next_packet()
+        sender.receive(zm._frame(zm._ACK + struct.pack("!Q", 0)))
+        sender.get_next_packet()
+
+        assert sender.offset == 4
+
+        sender.receive(zm._frame(zm._ACK + struct.pack("!Q", 4)))
+        sender.get_next_packet()
+        assert sender.offset == 8
+
+        sender.receive(zm._frame(zm._ACK + struct.pack("!Q", 0)))
+        assert sender.offset == 8
+
+        sender.receive(zm._frame(zm._RESUME + struct.pack("!Q", 2)))
+        assert sender.offset == 8
+
+
 def test_zmodem_receiver_ignores_malformed_frames():
     import importlib.util
     import os

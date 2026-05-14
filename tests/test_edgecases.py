@@ -22,6 +22,13 @@ def test_validate_config_types(tmp_path):
         AkitaZmodemMeshCore(config_file=str(cfg))
 
 
+def test_validate_config_rejects_oversized_mesh_chunk(tmp_path):
+    cfg = tmp_path / "bad_chunk.json"
+    cfg.write_text('{"mesh_packet_chunk_size": 185}')
+    with pytest.raises(ValueError):
+        AkitaZmodemMeshCore(config_file=str(cfg))
+
+
 def test_safe_extract_zip_memory(tmp_path):
     # a large zip with many entries should still be handled; just ensure no
     # crash

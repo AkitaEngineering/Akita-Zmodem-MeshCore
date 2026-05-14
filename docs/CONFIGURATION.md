@@ -20,10 +20,10 @@ Here's an explanation of each field in the configuration file:
     * **Type**: Integer  
     * **Default**: `256`
 
-* `"mesh_packet_chunk_size": 200`  
-    * **Description**: The maximum size (in bytes) of the payload for a single packet sent over the MeshCore network. This is after the `zmodem_app_port` has been prepended. Zmodem protocol packets can be larger than what the underlying mesh radio can handle in one go. This setting defines how the utility should break down larger Zmodem protocol data units into smaller chunks suitable for the mesh.  
+* `"mesh_packet_chunk_size": 184`  
+    * **Description**: The maximum size (in bytes) of the payload for a single packet sent over the MeshCore network, including the prepended `zmodem_app_port`. MeshCore firmware currently caps packet payloads at 184 bytes, so larger values are rejected by the application configuration. Zmodem protocol packets can be larger than what the underlying mesh radio can handle in one go, and this setting controls how those protocol data units are split into mesh-sized chunks.  
     * **Type**: Integer  
-    * **Default**: `200` (Adjust based on your MeshCore device's effective MTU and network conditions to avoid fragmentation by lower layers or packet loss).
+    * **Default**: `184`
 
 * `"timeout": 60`  
     * **Description**: The duration (in seconds) of inactivity after which an ongoing transfer is considered timed-out and subsequently canceled. Activity is defined as successfully sending or receiving data chunks relevant to the Zmodem transfer.  
@@ -87,7 +87,7 @@ local network and device.
     "mesh_serial_port": "/dev/ttyUSB0",
     "mesh_serial_baud": 115200,
     "zmodem_app_port": 2001,
-    "mesh_packet_chunk_size": 200
+    "mesh_packet_chunk_size": 184
 }
 ```
 
@@ -109,7 +109,7 @@ daemon on a gateway machine), use the TCP connection type:
     "mesh_tcp_host": "192.168.1.100",
     "mesh_tcp_port": 4403,
     "zmodem_app_port": 2001,
-    "mesh_packet_chunk_size": 200
+    "mesh_packet_chunk_size": 184
 }
 ```
 
