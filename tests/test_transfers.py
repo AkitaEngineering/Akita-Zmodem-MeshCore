@@ -409,6 +409,48 @@ def test_zmodem_receiver_accepts_nameless_file_object(tmp_path):
     assert sink.getvalue() == data
 
 
+def test_zmodem_sender_ignores_short_ack_frame(tmp_path):
+    src = tmp_path / "orig4.bin"
+    src.write_bytes(b"sender ack guard")
+
+    import importlib.util
+    import os
+    spec = importlib.util.spec_from_file_location(
+        'builtin_zmodem', os.path.join(os.getcwd(), 'zmodem.py'))
+    zm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(zm)
+    Sender = zm.Sender
+
+    with open(src, "rb") as sf:
+        sender = Sender(sf, chunk_size=128)
+        response = sender.receive(zm._frame(zm._ACK + b'\x00'))
+
+    assert response == b""
+    assert sender.state == 'init'
+
+
+def test_zmodem_receiver_ignores_malformed_frames():
+    import importlib.util
+    import os
+
+    spec = importlib.util.spec_from_file_location(
+        'builtin_zmodem', os.path.join(os.getcwd(), 'zmodem.py'))
+    zm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(zm)
+    Receiver = zm.Receiver
+
+    receiver = Receiver(io.BytesIO())
+
+    short_start = zm._frame(zm._START + b'\x00')
+    assert receiver.receive(short_start) == b""
+    assert receiver.state == 'waiting'
+
+    receiver.state = 'receiving'
+    short_data = zm._frame(zm._DATA + b'\x00')
+    assert receiver.receive(short_data) == b""
+    assert receiver.offset == 0
+
+
 @pytest.mark.asyncio
 async def test_end_to_end_app_transfer(tmp_path):
     # build two apps with a simple in-memory mesh linking them

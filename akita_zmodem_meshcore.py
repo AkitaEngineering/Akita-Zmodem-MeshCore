@@ -304,7 +304,7 @@ class AkitaZmodemMeshCore:
             src = str(payload.get('from_num', payload.get('from', 'unknown')))
 
             # Extract Data (decoded payload or raw text fallback)
-            data = payload.get('decoded', {}).get('payload')
+            data = (payload.get('decoded') or {}).get('payload')
             if not data:
                 txt = payload.get('text')
                 if isinstance(txt, str):
@@ -318,11 +318,8 @@ class AkitaZmodemMeshCore:
             logging.error(f"Msg Parse Error: {e}")
 
     async def _on_mesh_error(self, event):
-        logging.warning(
-            f"Mesh Error: {
-                event.payload if hasattr(
-                    event,
-                    'payload') else event}")
+        msg = event.payload if hasattr(event, 'payload') else event
+        logging.warning(f"Mesh Error: {msg}")
 
     # -------------------------------------------------------------------------
     # Send Logic
@@ -353,11 +350,10 @@ class AkitaZmodemMeshCore:
         fsize = os.path.getsize(filepath)
         # calculate checksum in a thread to avoid blocking the event loop
         checksum = await asyncio.to_thread(calculate_md5, filepath)
+        fname = os.path.basename(filepath)
 
         logging.info(
-            f"[Tx-{tid}] File: {
-                os.path.basename(filepath)} | Size: {
-                fsize:,} bytes | MD5: {checksum}")
+            f"[Tx-{tid}] File: {fname} | Size: {fsize:,} bytes | MD5: {checksum}")
 
         try:
             # Open file in thread to avoid blocking loop
@@ -530,10 +526,10 @@ class AkitaZmodemMeshCore:
                     f"[Rx-{active_tid}] delivering {len(data)} bytes to receiver")
                 resp = await asyncio.to_thread(receiver.receive, data)
                 t["bytes"] += len(data)
+                resp_len = len(resp) if resp else 0
+                receiver_state = getattr(receiver, 'state', 'unknown')
                 logging.debug(
-                    f"[Rx-{active_tid}] receiver state={
-                        receiver.state} resp_len={
-                        len(resp) if resp else 0}")
+                    f"[Rx-{active_tid}] receiver state={receiver_state} resp_len={resp_len}")
 
                 if resp:
                     resp_payload = struct.pack(
@@ -659,7 +655,7 @@ class AkitaZmodemMeshCore:
                     if cleanup:
                         try:
                             os.remove(zip_name)
-                        except BaseException:
+                        except OSError:
                             pass
         if cli_event:
             cli_event.set()
@@ -729,7 +725,7 @@ class AkitaZmodemMeshCore:
         if self.mesh:
             try:
                 await self.mesh.close()
-            except BaseException:
+            except Exception:
                 pass
 
 # -----------------------------------------------------------------------------
@@ -791,7 +787,7 @@ async def main():
         asyncio.create_task(app.stop())
     try:
         asyncio.get_running_loop().add_signal_handler(signal.SIGINT, sig_handler)
-    except BaseException:
+    except (NotImplementedError, RuntimeError):
         pass
 
     try:

@@ -119,6 +119,9 @@ class Sender:
         for payload in _deframe(self._inbuf):
             tp = payload[:1]
             if tp == _ACK:
+                if len(payload) < 9:
+                    logging.debug("Sender.receive: short ACK frame ignored")
+                    continue
                 off = struct.unpack("!Q", payload[1:9])[0]
                 # remote acknowledges up to off; update our send offset to match
                 # and position the file accordingly. Clamp to valid range.
@@ -133,6 +136,9 @@ class Sender:
                     pass
                 self.state = 'sending'
             elif tp == _RESUME:
+                if len(payload) < 9:
+                    logging.debug("Sender.receive: short RESUME frame ignored")
+                    continue
                 off = struct.unpack("!Q", payload[1:9])[0]
                 # Clamp resume offset to valid range before seeking
                 if off < 0:
@@ -184,7 +190,13 @@ class Receiver:
         for payload in _deframe(self._inbuf):
             tp = payload[:1]
             if tp == _START:
+                if len(payload) < 11:
+                    logging.debug("Receiver.receive: short START frame ignored")
+                    continue
                 name_len = struct.unpack("!H", payload[1:3])[0]
+                if len(payload) < 3 + name_len + 8:
+                    logging.debug("Receiver.receive: truncated START frame ignored")
+                    continue
                 size = struct.unpack("!Q",
                                      payload[3 + name_len:3 + name_len + 8])[0]
                 self.expected_size = size
@@ -253,6 +265,9 @@ class Receiver:
                 out += _frame(resp)
                 self.state = 'receiving'
             elif tp == _DATA and self.state == 'receiving':
+                if len(payload) < 9:
+                    logging.debug("Receiver.receive: short DATA frame ignored")
+                    continue
                 off = struct.unpack("!Q", payload[1:9])[0]
                 chunk = payload[9:]
                 if off != self.offset:
@@ -262,10 +277,13 @@ class Receiver:
                 else:
                     # Ensure we have an open file handle before writing
                     if self.fobj is None:
+                        if not self.filepath:
+                            resp = _RESUME + struct.pack("!Q", self.offset)
+                            out += _frame(resp)
+                            continue
                         # attempt to open in append mode
                         try:
-                            self.fobj = open(
-                                self.filepath, 'ab') if self.filepath else None
+                            self.fobj = open(self.filepath, 'ab')
                         except Exception:
                             # cannot open file; request resume (no change)
                             resp = _RESUME + struct.pack("!Q", self.offset)
