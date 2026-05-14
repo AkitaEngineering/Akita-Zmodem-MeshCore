@@ -23,6 +23,7 @@ Here's an explanation of each field in the configuration file:
 * `"mesh_packet_chunk_size": 184`  
     * **Description**: The maximum size (in bytes) of the payload for a single packet sent over the MeshCore network, including the prepended `zmodem_app_port`. MeshCore firmware currently caps packet payloads at 184 bytes, so larger values are rejected by the application configuration. Zmodem protocol packets can be larger than what the underlying mesh radio can handle in one go, and this setting controls how those protocol data units are split into mesh-sized chunks.  
     * **Type**: Integer  
+    * **Valid range**: `3` to `184`  
     * **Default**: `184`
 
 * `"timeout": 60`  
@@ -153,7 +154,8 @@ start and enable the service.
 - TCP connection refused: verify the bridge/daemon is listening on the given
     host/port and there are no firewall rules blocking access.
 - Fragmentation or errors: reduce `mesh_packet_chunk_size` to accommodate a
-    smaller MTU on your radio link; conservative defaults are 200 bytes.
+    smaller MTU on your radio link; the built-in default is 184 bytes and the
+    configured value cannot exceed the current MeshCore payload limit.
 
 
 This command will attempt to connect via TCP to 192.168.1.50 on port 6500, overriding any serial settings in `akita_zmodem_meshcore_config.json` for this specific execution.

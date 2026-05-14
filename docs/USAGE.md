@@ -16,6 +16,12 @@ If no COMMAND is provided, the utility runs in daemon/listener mode, waiting for
 > **Note:** The Zmodem protocol is implemented internally, so you do not need
 to install any external Zmodem library.  All protocol state, retransmits, and
 resumes are handled by `zmodem.py` shipped in this repository.
+
+> **MeshCore compatibility note:** `mesh_packet_chunk_size` includes the
+> prepended 2-byte app-port header and must not exceed the current MeshCore
+> payload limit of `184` bytes. MeshCore can also deliver duplicate control
+> frames via different routes; the built-in sender ignores stale duplicate
+> ACK/RESUME frames so transfers do not rewind progress.
 ---
 
 ## Connection Arguments
@@ -193,6 +199,10 @@ Tips:
 - **Node IDs**: The `<destination_node_id>` used in the `send` command must be a valid identifier recognized by your MeshCore setup (e.g. `!aabbccdd`, public key, or name).
   
 - **Transfer IDs**: These are logged when a transfer starts and are required for `status` and `cancel` commands.
+
+- **Mesh Packet Size**: If you tune `mesh_packet_chunk_size`, keep it above the
+  2-byte app-port header and at or below `184` bytes unless the underlying
+  MeshCore payload limit changes.
 
 - **Single CLI Operation at a Time**: CLI usage focuses on one transfer at a time. For general listening or background operation, run the utility in daemon mode (i.e., without a command).
 

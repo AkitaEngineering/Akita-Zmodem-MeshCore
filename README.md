@@ -46,17 +46,18 @@ This utility is designed for asynchronous operation, making it suitable for envi
 
 ## Key Features
 
-* **Built‑in Zmodem Protocol**: A fully self‑contained, Z‑modem‑like implementation lives in `zmodem.py`, so there is no requirement to install an external Zmodem library. The code handles handshakes, CRC32 framing, resumable transfers, and per‑chunk port headers for reliable operation over the mesh.
+* **Built‑in Zmodem Protocol**: A fully self‑contained, Z‑modem‑like implementation lives in `zmodem.py`, so there is no requirement to install an external Zmodem library. The code handles handshakes, CRC32 framing, resumable transfers, per‑chunk port headers, and stale duplicate ACK/RESUME suppression for reliable operation over the mesh.
 * **MeshCore Integration**: Uses Python bindings for MeshCore networks (tested with `fdlamotte/meshcore_py` but compatible with any API providing `MeshCore.create_*`, `mesh.subscribe`, and `mesh.commands.send_msg`).
 * **Async I/O with asyncio**: Non‑blocking operations keep transfers responsive even on poor links.
 * **File & Directory Support**: Send files directly or zip directories on‑the‑fly; received zips are automatically extracted.
-* **Chunk Header Handling**: Data sent over the mesh is split into `mesh_packet_chunk_size` fragments; each fragment begins with an application port header so the receiver can reassemble correctly.
+* **Chunk Header Handling**: Data sent over the mesh is split into `mesh_packet_chunk_size` fragments; each fragment begins with an application port header so the receiver can reassemble correctly. The default is `184` bytes, matching the current MeshCore payload ceiling.
 * **Configurable Timeouts**: Automatic cancellation of stalled transfers.
 * **JSON Configuration**: Tweak ports, chunk sizes, MeshCore connection params, and more via `akita_zmodem_meshcore_config.json` or CLI overrides.
 * **Robust CLI**: Commands (`send`, `receive`, `status`, `cancel`) either run as a one‑off or the script can operate as a long‑running daemon.
 * **Daemon Mode & Status**: Run as a listener and query active transfers.
 * **Cancellation & Safety**: Cancel mid‑transfer and protect against unwanted overwrites.
 * **Detailed Logging**: Built‑in logging at INFO/DEBUG levels aids debugging and monitoring.
+* **Operational Context**: See [USE_CASES.md](USE_CASES.md) for concrete deployment scenarios across UAS, agriculture, SAR, infrastructure, research, and remote maintenance.
 
 ## Important Note on Dependencies
 
@@ -80,7 +81,7 @@ All other functionality is self‑contained within the repository.
     ```bash
     pip install -r requirements.txt
     ```
-    This will attempt to install `meshcore`, `zmodem`, `tqdm`, and `crcmod` (often a zmodem dependency). Ensure `meshcore` installs a library compatible with the script's usage.
+    This installs `meshcore` plus the optional `tqdm` and `crcmod` helpers listed in `requirements.txt`. No external `zmodem` package is required.
 
 ## Configuration
 
@@ -91,7 +92,7 @@ All other functionality is self‑contained within the repository.
 
 2.  **Edit Configuration**: Modify `akita_zmodem_meshcore_config.json` to suit your needs. Key settings include:
     * `zmodem_app_port`: An application-level port number used to distinguish Zmodem traffic over MeshCore.
-    * `mesh_packet_chunk_size`: Maximum size of data chunks sent over the mesh network (after Zmodem protocol data and app port are added).
+    * `mesh_packet_chunk_size`: Maximum size of data chunks sent over the mesh network, including the prepended app-port header. The valid MeshCore-safe range is greater than the 2-byte header size and at most `184` bytes.
     * `timeout`: Transfer timeout in seconds.
     * `mesh_connection_type`: How to connect to your MeshCore device (`serial` or `tcp`).
     * `mesh_serial_port`, `mesh_serial_baud`: Settings for serial connection.
