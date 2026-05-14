@@ -1,4 +1,5 @@
 ﻿import asyncio
+import io
 import os
 import shutil
 import sys
@@ -116,6 +117,110 @@ async def test_send_file_succeeds(monkeypatch, tmp_path):
     await asyncio.wait_for(cli_event.wait(), timeout=5.0)
 
     # transfer should be removed from transfers
+    assert tid not in app.transfers
+
+
+@pytest.mark.asyncio
+async def test_send_file_rejects_empty_destination(tmp_path):
+    from akita_zmodem_meshcore import AkitaZmodemMeshCore
+
+    fp = tmp_path / "small.bin"
+    fp.write_bytes(b"0123456789")
+
+    app = AkitaZmodemMeshCore()
+    app.mesh = MockMesh()
+
+    cli_event = asyncio.Event()
+    tid = await app.send_file('', str(fp), cli_event)
+
+    assert tid is None
+    assert cli_event.is_set()
+    assert app.mesh.commands.sent == []
+
+
+@pytest.mark.asyncio
+async def test_send_file_chunks_use_destination_and_only_prefix_header(monkeypatch, tmp_path):
+    import akita_zmodem_meshcore
+    from akita_zmodem_meshcore import AkitaZmodemMeshCore, APP_PORT_HEADER_FORMAT
+
+    packet = b"ABCDEFGHIJKL"
+    fp = tmp_path / "small.bin"
+    fp.write_bytes(b"placeholder")
+
+    def sender_factory(fobj, *args, **kwargs):
+        sender = MockSender(fobj, packets=[packet])
+        sender.state = 'mock-sending'
+        return sender
+
+    mock_zmod = types.SimpleNamespace(
+        Sender=sender_factory,
+        Receiver=MockReceiver)
+    monkeypatch.setattr(akita_zmodem_meshcore, 'zmodem', mock_zmod)
+
+    app = AkitaZmodemMeshCore()
+    app.mesh = MockMesh()
+    app.mesh_packet_chunk_size = 6
+    app.tx_delay_s = 0
+
+    cli_event = asyncio.Event()
+    tid = await app.send_file('destnode', str(fp), cli_event)
+
+    assert tid is not None
+    await asyncio.wait_for(cli_event.wait(), timeout=5.0)
+
+    header = struct.pack(APP_PORT_HEADER_FORMAT, app.zmodem_app_port)
+    max_piece = app.mesh_packet_chunk_size - len(header)
+    expected = [
+        ('destnode', header + packet[i:i + max_piece])
+        for i in range(0, len(packet), max_piece)
+    ]
+
+    assert app.mesh.commands.sent == expected
+    assert tid not in app.transfers
+
+
+@pytest.mark.asyncio
+async def test_receive_handler_replies_unicast_to_source(monkeypatch, tmp_path):
+    import akita_zmodem_meshcore
+    from akita_zmodem_meshcore import AkitaZmodemMeshCore, APP_PORT_HEADER_FORMAT
+
+    response = b"ACKDATA"
+
+    class ReplyingReceiver:
+        def __init__(self, fobj_or_path):
+            if isinstance(fobj_or_path, str):
+                self.fobj = open(fobj_or_path, 'wb')
+            else:
+                self.fobj = fobj_or_path
+            self._finished = False
+            self.state = 'mock-receiving'
+
+        def receive(self, data):
+            if self.fobj:
+                self.fobj.write(data)
+            self._finished = True
+            return response
+
+        def is_finished(self):
+            return self._finished
+
+    mock_zmod = types.SimpleNamespace(
+        Sender=MockSender,
+        Receiver=ReplyingReceiver)
+    monkeypatch.setattr(akita_zmodem_meshcore, 'zmodem', mock_zmod)
+
+    app = AkitaZmodemMeshCore()
+    app.mesh = MockMesh()
+
+    dest = tmp_path / "incoming.bin"
+    tid = await app.receive_file(str(dest), overwrite=True)
+
+    assert tid is not None
+
+    await app._handle_zmodem_data('node123', b'MOCKDATA')
+
+    header = struct.pack(APP_PORT_HEADER_FORMAT, app.zmodem_app_port)
+    assert app.mesh.commands.sent == [('node123', header + response)]
     assert tid not in app.transfers
 
 
@@ -259,6 +364,49 @@ def test_zmodem_resume(tmp_path):
         _simulate_zmodem_exchange(s, r)
 
     assert dst.read_bytes() == original
+
+
+def test_zmodem_deframe_rejects_oversized_packet(tmp_path):
+    import importlib.util
+    import os
+
+    spec = importlib.util.spec_from_file_location(
+        'builtin_zmodem', os.path.join(os.getcwd(), 'zmodem.py'))
+    zm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(zm)
+
+    payload = bytearray(struct.pack("!I", zm.MAX_FRAME_PAYLOAD + 1))
+
+    assert list(zm._deframe(payload)) == []
+    assert payload == bytearray()
+
+
+def test_zmodem_receiver_accepts_nameless_file_object(tmp_path):
+    src = tmp_path / "orig3.bin"
+    data = b"nameless target data" * 64
+    src.write_bytes(data)
+
+    import importlib.util
+    import os
+    spec = importlib.util.spec_from_file_location(
+        'builtin_zmodem', os.path.join(os.getcwd(), 'zmodem.py'))
+    zm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(zm)
+    Sender, Receiver = zm.Sender, zm.Receiver
+
+    class MemorySink(io.BytesIO):
+        def close(self):
+            self.was_closed = True
+
+    sink = MemorySink()
+    sink.was_closed = False
+
+    with open(src, "rb") as sf:
+        s = Sender(sf, chunk_size=128)
+        r = Receiver(sink)
+        _simulate_zmodem_exchange(s, r)
+
+    assert sink.getvalue() == data
 
 
 @pytest.mark.asyncio

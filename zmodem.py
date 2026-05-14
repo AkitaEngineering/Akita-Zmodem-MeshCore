@@ -18,6 +18,8 @@ import struct
 import zlib
 import logging
 
+MAX_FRAME_PAYLOAD = 1024 * 1024
+
 # packet types
 _START = b'S'      # <filename_len:uint16><filename><filesize:uint64>
 _DATA = b'D'       # <offset:uint64><payload>
@@ -40,6 +42,12 @@ def _deframe(buffer: bytearray):
         if len(buffer) < 4:
             break
         length = struct.unpack("!I", buffer[:4])[0]
+        if length > MAX_FRAME_PAYLOAD:
+            logging.warning(
+                "_deframe: oversized packet length %d, clearing buffer",
+                length)
+            buffer.clear()
+            break
         if len(buffer) < 4 + length + 4:
             break
         start = 4
@@ -202,30 +210,44 @@ class Receiver:
                 if existing and existing < size:
                     # resume: open for append
                     self.offset = existing
-                    # close any previously opened handle
-                    try:
-                        if self.fobj:
-                            try:
-                                self.fobj.close()
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                    self.fobj = open(
-                        target_name, 'ab') if target_name else None
+                    if target_name:
+                        # close any previously opened handle
+                        try:
+                            if self.fobj:
+                                try:
+                                    self.fobj.close()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        self.fobj = open(target_name, 'ab')
+                    elif self.fobj:
+                        try:
+                            self.fobj.seek(self.offset)
+                        except Exception:
+                            pass
                     resp = _RESUME + struct.pack("!Q", self.offset)
                 else:
                     # start fresh: open for write (truncate)
-                    try:
-                        if self.fobj:
-                            try:
-                                self.fobj.close()
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                    self.fobj = open(
-                        target_name, 'wb') if target_name else None
+                    if target_name:
+                        try:
+                            if self.fobj:
+                                try:
+                                    self.fobj.close()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        self.fobj = open(target_name, 'wb')
+                    elif self.fobj:
+                        try:
+                            self.fobj.seek(0)
+                        except Exception:
+                            pass
+                        try:
+                            self.fobj.truncate(0)
+                        except Exception:
+                            pass
                     self.offset = 0
                     resp = _ACK + struct.pack("!Q", self.offset)
                 out += _frame(resp)
