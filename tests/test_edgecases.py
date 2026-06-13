@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from akita_zmodem_meshcore import AkitaZmodemMeshCore, _safe_extract_zip
@@ -18,6 +20,24 @@ def test_validate_config_types(tmp_path):
     # write invalid config
     cfg = tmp_path / "bad.json"
     cfg.write_text('{"mesh_packet_chunk_size": "large"}')
+    with pytest.raises(ValueError):
+        AkitaZmodemMeshCore(config_file=str(cfg))
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"zmodem_app_port": 70000}',
+        '{"chunk_size": 0}',
+        '{"mesh_connection_type": "bluetooth"}',
+        '{"mesh_tcp_port": 0}',
+        '{"mesh_serial_baud": -1}',
+        '{"tx_delay_ms": -1}',
+    ],
+)
+def test_validate_config_rejects_invalid_runtime_values(tmp_path, content):
+    cfg = tmp_path / "bad_runtime.json"
+    cfg.write_text(content)
     with pytest.raises(ValueError):
         AkitaZmodemMeshCore(config_file=str(cfg))
 
@@ -44,20 +64,51 @@ def test_safe_extract_zip_memory(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_handle_zmodem_data_open_failure(tmp_path, monkeypatch):
-    # Simulate failing to open file by making path a directory
+async def test_receive_file_rejects_blocked_parent_path(tmp_path):
+    # Simulate a parent path that cannot be created because a file is present.
     app = AkitaZmodemMeshCore()
     app.mesh = object()
     # prepare settings to trigger error in _handle_zmodem_data
-    tid = await app.receive_file(str(tmp_path), overwrite=True)
+    dest = tmp_path / "blocked" / "incoming.bin"
+    dest.parent.write_text("not a directory")
+    tid = await app.receive_file(str(dest), overwrite=True)
+    assert tid is None
+
+
+@pytest.mark.asyncio
+async def test_receive_file_rejects_directory_destination(tmp_path):
+    app = AkitaZmodemMeshCore()
+    cli_event = asyncio.Event()
+
+    tid = await app.receive_file(
+        str(tmp_path),
+        overwrite=True,
+        cli_event=cli_event,
+    )
+
+    assert tid is None
+    assert cli_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_handle_zmodem_data_receiver_init_failure(tmp_path, monkeypatch):
+    app = AkitaZmodemMeshCore()
+    app.mesh = object()
+    dest = tmp_path / "incoming.bin"
+    tid = await app.receive_file(str(dest), overwrite=True)
     # craft a fake payload that _handle_zmodem_data will accept
     # monkeypatch zmodem.Receiver to simple object
 
     class DummyRecv:
         def __init__(self, f):
             raise IsADirectoryError(f"Is a directory: '{f}'")
-        def receive(self, data): return b''
-        def is_finished(self): return False
+
+        def receive(self, data):
+            return b''
+
+        def is_finished(self):
+            return False
+
     monkeypatch.setattr('zmodem.Receiver', DummyRecv)
     # run handler with dummy data
     await app._handle_zmodem_data('peer', b'hello')
@@ -91,3 +142,88 @@ async def test_send_directory_skips_symlinks(tmp_path):
     with zipfile.ZipFile(called['zip'], 'r') as z:
         names = z.namelist()
     assert 'link.txt' not in names
+
+
+@pytest.mark.asyncio
+async def test_send_directory_rejects_missing_path(tmp_path):
+    app = AkitaZmodemMeshCore()
+    app.mesh = object()
+    cli_event = asyncio.Event()
+
+    tid = await app.send_directory(
+        'peer',
+        str(tmp_path / "missing"),
+        cli_event,
+    )
+
+    assert tid is None
+    assert cli_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_send_directory_rejects_empty_destination(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    app = AkitaZmodemMeshCore()
+    app.mesh = object()
+    cli_event = asyncio.Event()
+
+    tid = await app.send_directory('', str(source), cli_event)
+
+    assert tid is None
+    assert cli_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_receive_file_creates_parent_directory(tmp_path):
+    app = AkitaZmodemMeshCore()
+    dest = tmp_path / "nested" / "incoming.bin"
+
+    tid = await app.receive_file(str(dest), overwrite=True)
+
+    assert tid is not None
+    assert dest.parent.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_receive_directory_rejects_file_destination(tmp_path):
+    app = AkitaZmodemMeshCore()
+    dest = tmp_path / "not_a_dir"
+    dest.write_text("occupied")
+    cli_event = asyncio.Event()
+
+    tid = await app.receive_directory(
+        str(dest),
+        overwrite=True,
+        cli_event=cli_event,
+    )
+
+    assert tid is None
+    assert cli_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_receive_directory_uses_internal_temp_even_without_overwrite(
+        tmp_path,
+        monkeypatch):
+    app = AkitaZmodemMeshCore()
+    dest = tmp_path / "dir_out"
+    captured = {}
+
+    async def fake_receive_file(filepath, overwrite=False, cli_event=None):
+        captured['overwrite'] = overwrite
+        if cli_event:
+            cli_event.set()
+        return None
+
+    monkeypatch.setattr(app, "receive_file", fake_receive_file)
+    cli_event = asyncio.Event()
+
+    await app.receive_directory(
+        str(dest),
+        overwrite=False,
+        cli_event=cli_event,
+    )
+
+    assert captured['overwrite'] is True
+    assert cli_event.is_set()

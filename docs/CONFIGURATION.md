@@ -26,10 +26,10 @@ Here's an explanation of each field in the configuration file:
     * **Valid range**: `3` to `184`  
     * **Default**: `184`
 
-* `"timeout": 60`  
+* `"timeout": 120`  
     * **Description**: The duration (in seconds) of inactivity after which an ongoing transfer is considered timed-out and subsequently canceled. Activity is defined as successfully sending or receiving data chunks relevant to the Zmodem transfer.  
     * **Type**: Integer  
-    * **Default**: `60`
+    * **Default**: `120`
 
 * `"mesh_connection_type": "serial"`  
     * **Description**: Specifies the method used to connect to the local MeshCore device/interface that the `meshcore_py` library will use.  

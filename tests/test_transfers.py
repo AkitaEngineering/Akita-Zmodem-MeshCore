@@ -366,6 +366,56 @@ def test_zmodem_resume(tmp_path):
     assert dst.read_bytes() == original
 
 
+def test_zmodem_unicode_filename_roundtrip(tmp_path):
+    src = tmp_path / "cafe-\u2603.bin"
+    data = b"unicode filename payload" * 20
+    src.write_bytes(data)
+    dst = tmp_path / "recv_unicode.bin"
+
+    import importlib.util
+    import os
+    spec = importlib.util.spec_from_file_location(
+        'builtin_zmodem', os.path.join(os.getcwd(), 'zmodem.py'))
+    zm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(zm)
+
+    with open(src, "rb") as sf:
+        s = zm.Sender(sf, chunk_size=64)
+        r = zm.Receiver(str(dst))
+        _simulate_zmodem_exchange(s, r)
+
+    assert dst.read_bytes() == data
+
+
+def test_zmodem_receiver_rejects_end_before_expected_size(tmp_path):
+    import importlib.util
+    import os
+    spec = importlib.util.spec_from_file_location(
+        'builtin_zmodem', os.path.join(os.getcwd(), 'zmodem.py'))
+    zm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(zm)
+
+    src = tmp_path / "orig_incomplete.bin"
+    src.write_bytes(b"0123456789")
+    dst = tmp_path / "recv_incomplete.bin"
+
+    with open(src, "rb") as sf:
+        sender = zm.Sender(sf, chunk_size=4)
+        receiver = zm.Receiver(str(dst))
+        start = sender.get_next_packet()
+        sender.receive(receiver.receive(start))
+
+        first_data = sender.get_next_packet()
+        sender.receive(receiver.receive(first_data))
+
+        response = receiver.receive(zm._frame(zm._END))
+        sender.receive(response)
+
+    assert not receiver.is_finished()
+    assert sender.state == 'sending'
+    assert dst.read_bytes() == b"0123"
+
+
 def test_zmodem_deframe_rejects_oversized_packet(tmp_path):
     import importlib.util
     import os

@@ -81,7 +81,7 @@ All other functionality is self‑contained within the repository.
     ```bash
     pip install -r requirements.txt
     ```
-    This installs `meshcore` plus the optional `tqdm` and `crcmod` helpers listed in `requirements.txt`. No external `zmodem` package is required.
+    This installs `meshcore` plus the optional `tqdm` helper listed in `requirements.txt`. No external `zmodem` package is required.
 
 ## Configuration
 
@@ -113,13 +113,6 @@ Global Options (Optional, override config file):
 ```
 --config <path>          Path to JSON configuration file (created if missing)
 --mesh-type [serial|tcp] Override connection type
---serial-port <PORT_PATH> (e.g., /dev/ttyUSB0, COM3)
---serial-baud <BAUDRATE>
---tcp-host <HOST_IP_OR_NAME>
---tcp-port <PORT_NUMBER>
-
-```
---mesh-type [serial|tcp]
 --serial-port <PORT_PATH> (e.g., /dev/ttyUSB0, COM3)
 --serial-baud <BAUDRATE>
 --tcp-host <HOST_IP_OR_NAME>

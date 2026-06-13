@@ -85,8 +85,14 @@ class Sender:
             return self._queue.pop(0)
         if self.state == 'init':
             # send START header
-            payload = _START + \
-                struct.pack("!H", len(self.filename)) + self.filename.encode('utf-8')
+            encoded_name = self.filename.encode('utf-8')
+            if len(encoded_name) > 65535:
+                raise ValueError("filename is too long for protocol header")
+            payload = (
+                _START
+                + struct.pack("!H", len(encoded_name))
+                + encoded_name
+            )
             payload += struct.pack("!Q", self.filesize)
             self._queue.append(_frame(payload))
             self.state = 'waiting_ack'
@@ -100,13 +106,12 @@ class Sender:
             data = self.fobj.read(self.chunk_size)
             if not data:
                 self._queue.append(_frame(_END))
-                self.state = 'finished'
+                self.state = 'waiting_end_ack'
                 return self._queue.pop(0)
             payload = _DATA + struct.pack("!Q", self.offset) + data
             self.offset += len(data)
             return _frame(payload)
-        if self.state == 'finished':
-            self._finished = True
+        if self.state in ('finished', 'waiting_end_ack'):
             return b""
         # in waiting_ack or other states, nothing to send until ack arrives
         return b""
@@ -305,10 +310,15 @@ class Receiver:
                             out += _frame(resp)
                             continue
                     self.fobj.write(chunk)
+                    self.fobj.flush()
                     self.offset += len(chunk)
                     resp = _ACK + struct.pack("!Q", self.offset)
                     out += _frame(resp)
             elif tp == _END and self.state == 'receiving':
+                if self.expected_size is not None and self.offset != self.expected_size:
+                    resp = _RESUME + struct.pack("!Q", self.offset)
+                    out += _frame(resp)
+                    continue
                 self.state = 'done'
                 try:
                     if self.fobj:

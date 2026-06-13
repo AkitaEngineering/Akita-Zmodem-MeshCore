@@ -51,7 +51,9 @@ These arguments override settings in the `akita_zmodem_meshcore_config.json` fil
 
 If you run the script without any specific command, it starts in daemon mode. It will connect to the MeshCore network (using configuration file settings or CLI overrides) and listen for incoming Zmodem transfers.
 
-Received files will be saved based on pre-declared receive commands or, if not pre-declared, the Zmodem protocol's filename. (This part of auto-reception to an arbitrary path based on sender's filename would be an advanced feature not fully implemented; currently, a receive "slot" is generally needed.)
+Received files are accepted by pre-declared receive commands. Start a `receive`
+command on the destination node for the path where the next incoming transfer
+should be written.
 
 **Examples:**
 
@@ -126,7 +128,8 @@ Displays the current status of an active or recently completed/failed transfer.
 python akita_zmodem_meshcore.py status 1
 ```
 
-Output will be a JSON object with details like state, file, progress percentage, etc.
+Output is a JSON object containing the active transfer records currently known
+to this process.
 
 ---
 
@@ -142,7 +145,8 @@ Attempts to cancel an ongoing transfer.
 python akita_zmodem_meshcore.py cancel 1
 ```
 
-The utility will attempt to stop the transfer and clean up associated resources. The success message will indicate if the cancellation was processed.
+The utility will attempt to stop the transfer and clean up associated
+resources.
 
 ---
 

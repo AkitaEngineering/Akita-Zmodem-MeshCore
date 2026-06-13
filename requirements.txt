@@ -13,5 +13,3 @@ meshcore
 # Optional, for CLI progress bars
 tqdm
 
-# Optional: CRC utilities (not required unless using external zmodem libs)
-crcmod

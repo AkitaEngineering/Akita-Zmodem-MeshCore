@@ -81,10 +81,9 @@ CONFIG_FILE = "akita_zmodem_meshcore_config.json"
 MESHCORE_MAX_PACKET_PAYLOAD = 184
 DEFAULT_CONFIG = {
     "zmodem_app_port": 2001,
-    # "chunk_size" is included for completeness but is unused by the
-    # current implementation; some third‑party zmodem wrappers expose a
-    # chunk size parameter so we keep the value here for compatibility.
-    "chunk_size": 256,             # Internal Zmodem buffer size (unused)
+    # Internal protocol data block size. Mesh packets are still fragmented
+    # further according to "mesh_packet_chunk_size".
+    "chunk_size": 256,
     # Max payload per mesh packet including the app-port header.
     "mesh_packet_chunk_size": MESHCORE_MAX_PACKET_PAYLOAD,
     "timeout": 120,                # Extended timeout for slow links
@@ -93,7 +92,7 @@ DEFAULT_CONFIG = {
     "mesh_serial_baud": 115200,
     "mesh_tcp_host": "127.0.0.1",
     "mesh_tcp_port": 4403,
-    "tx_delay_ms": 150             # Throttle to prevent radio buffer saturation
+    "tx_delay_ms": 150             # Throttle to prevent radio saturation
 }
 
 APP_PORT_HEADER_FORMAT = "!H"
@@ -251,8 +250,11 @@ class AkitaZmodemMeshCore:
         # ensure numeric configuration values are of the expected type
         fields = [
             ("zmodem_app_port", int),
+            ("chunk_size", int),
             ("mesh_packet_chunk_size", int),
             ("timeout", (int, float)),
+            ("mesh_serial_baud", int),
+            ("mesh_tcp_port", int),
             ("tx_delay_ms", (int, float)),
         ]
         for key, typ in fields:
@@ -261,10 +263,29 @@ class AkitaZmodemMeshCore:
                 raise ValueError(
                     f"Configuration key '{key}' must be {typ}, got {type(val)}")
             if key in (
-                "mesh_packet_chunk_size",
+                    "chunk_size",
+                    "mesh_packet_chunk_size",
                     "timeout") and val is not None:
                 if val <= 0:
                     raise ValueError(f"{key} must be positive")
+            if key == "tx_delay_ms" and val is not None and val < 0:
+                raise ValueError("tx_delay_ms must be zero or positive")
+
+        app_port = self.app_config.get("zmodem_app_port")
+        if app_port is not None and not 0 <= app_port <= 65535:
+            raise ValueError("zmodem_app_port must be between 0 and 65535")
+
+        tcp_port = self.app_config.get("mesh_tcp_port")
+        if tcp_port is not None and not 1 <= tcp_port <= 65535:
+            raise ValueError("mesh_tcp_port must be between 1 and 65535")
+
+        conn_type = self.app_config.get("mesh_connection_type")
+        if conn_type not in ("serial", "tcp"):
+            raise ValueError("mesh_connection_type must be 'serial' or 'tcp'")
+
+        if self.app_config.get("mesh_serial_baud", 1) <= 0:
+            raise ValueError("mesh_serial_baud must be positive")
+
         chunk_size = self.app_config.get("mesh_packet_chunk_size")
         if chunk_size is not None:
             if chunk_size <= APP_PORT_HEADER_SIZE:
@@ -458,11 +479,25 @@ class AkitaZmodemMeshCore:
     # Receive Logic
     # -------------------------------------------------------------------------
     async def receive_file(self, filepath, overwrite=False, cli_event=None):
+        if os.path.isdir(filepath):
+            logging.error(f"Destination is a directory, not a file: {filepath}")
+            if cli_event:
+                cli_event.set()
+            return None
         if os.path.exists(filepath) and not overwrite:
             logging.error(f"File exists: {filepath} (Use --overwrite)")
             if cli_event:
                 cli_event.set()
             return None
+        parent = os.path.dirname(os.path.abspath(filepath))
+        if parent:
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except OSError as e:
+                logging.error(f"Cannot create destination directory: {e}")
+                if cli_event:
+                    cli_event.set()
+                return None
 
         tid = self.generate_transfer_id()
         self.transfers[tid] = {
@@ -575,6 +610,21 @@ class AkitaZmodemMeshCore:
     # -------------------------------------------------------------------------
 
     async def send_directory(self, dest, path, cli_event, cleanup=True):
+        if not self.mesh:
+            if cli_event:
+                cli_event.set()
+            return None
+        if not isinstance(dest, str) or not dest:
+            logging.error(f"Invalid destination node: {dest}")
+            if cli_event:
+                cli_event.set()
+            return None
+        if not os.path.isdir(path):
+            logging.error(f"Directory not found: {path}")
+            if cli_event:
+                cli_event.set()
+            return None
+
         # create temporary zip file in system temp directory to avoid cluttering
         # the working directory; the file is deleted when the transfer finishes
         # (or on error).
@@ -638,15 +688,20 @@ class AkitaZmodemMeshCore:
             overwrite,
             cli_event,
             cleanup=True):
+        if os.path.exists(path) and not os.path.isdir(path):
+            logging.error(f"Directory destination is a file: {path}")
+            if cli_event:
+                cli_event.set()
+            return None
         if not os.path.exists(path):
-            os.makedirs(path)
+            os.makedirs(path, exist_ok=True)
         # create a secure temporary file for the incoming zip to avoid
         # predictable filenames and TOCTOU issues
         with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
             zip_name = tf.name
 
         f_event = asyncio.Event()
-        tid = await self.receive_file(zip_name, overwrite, f_event)
+        tid = await self.receive_file(zip_name, True, f_event)
         if tid:
             self._temp_zips.append(zip_name)
             self._register_temp(zip_name)
@@ -666,6 +721,11 @@ class AkitaZmodemMeshCore:
                             os.remove(zip_name)
                         except OSError:
                             pass
+        elif cleanup:
+            try:
+                os.remove(zip_name)
+            except OSError:
+                pass
         if cli_event:
             cli_event.set()
 
