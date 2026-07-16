@@ -40,8 +40,16 @@ These arguments override settings in the `akita_zmodem_meshcore_config.json` fil
 - `--tcp-host <HOST_IP_OR_NAME>`: The hostname or IP address of the MeshCore device if using TCP.  
   Example: `--tcp-host 192.168.1.10`
 
-- `--tcp-port <PORT_NUMBER>`: The TCP port number on the MeshCore device.  
+- `--tcp-port <PORT_NUMBER>`: The TCP port number on the MeshCore device.
   Example: `--tcp-port 4403`
+
+- `--control-host <HOST_IP_OR_NAME>`: The local control host used by `status`
+  and `cancel`.
+  Example: `--control-host 127.0.0.1`
+
+- `--control-port <PORT_NUMBER>`: The local control port used by `status` and
+  `cancel`.
+  Example: `--control-port 8765`
 
 ---
 
@@ -116,11 +124,12 @@ python akita_zmodem_meshcore.py receive /home/user/received_projects/ --overwrit
 
 ---
 
-### 4. `status <transfer_id>`
+### 4. `status [transfer_id]`
 
-Displays the current status of an active or recently completed/failed transfer.
+Displays the current status of active transfers in the running daemon/process.
 
-- `<transfer_id>`: The numerical ID of the transfer.
+- `<transfer_id>`: Optional numerical ID of one transfer. If omitted, all
+  active transfers are returned.
 
 **Example:**
 
@@ -128,8 +137,9 @@ Displays the current status of an active or recently completed/failed transfer.
 python akita_zmodem_meshcore.py status 1
 ```
 
-Output is a JSON object containing the active transfer records currently known
-to this process.
+Output is a JSON object returned by the running process over the local control
+socket. If no daemon, send, or receive process is listening on the configured
+control port, the command reports that it could not reach the control server.
 
 ---
 
@@ -145,8 +155,8 @@ Attempts to cancel an ongoing transfer.
 python akita_zmodem_meshcore.py cancel 1
 ```
 
-The utility will attempt to stop the transfer and clean up associated
-resources.
+The command asks the running process to stop the transfer and clean up
+associated resources over the local control socket.
 
 ---
 

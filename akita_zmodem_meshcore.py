@@ -92,7 +92,9 @@ DEFAULT_CONFIG = {
     "mesh_serial_baud": 115200,
     "mesh_tcp_host": "127.0.0.1",
     "mesh_tcp_port": 4403,
-    "tx_delay_ms": 150             # Throttle to prevent radio saturation
+    "tx_delay_ms": 150,            # Throttle to prevent radio saturation
+    "control_host": "127.0.0.1",
+    "control_port": 8765
 }
 
 APP_PORT_HEADER_FORMAT = "!H"
@@ -164,16 +166,18 @@ def calculate_md5(filepath):
     return hash_md5.hexdigest()
 
 
-def _safe_extract_zip(zip_path, extract_to):
+def _safe_extract_zip(zip_path, extract_to, overwrite=True):
     """Safely extract a zip file into `extract_to` preventing ZipSlip.
 
     Streams entry names to avoid loading an entire name list into memory.
-    Raises an Exception if any member would extract outside `extract_to`.
+    Raises an Exception if any member would extract outside `extract_to`, or
+    if `overwrite` is false and an archive member would replace a file.
     """
     import zipfile
     import os
 
     with zipfile.ZipFile(zip_path, 'r') as z:
+        members = []
         for info in z.infolist():
             member = info.filename
             normalized = os.path.normpath(member)
@@ -187,6 +191,13 @@ def _safe_extract_zip(zip_path, extract_to):
                     abs_base + os.sep)):
                 raise UnsafeZipError(
                     f"Zip would extract outside target: {member}")
+            if not overwrite and not (member.endswith('/') or info.is_dir()):
+                if os.path.exists(abs_dest):
+                    raise FileExistsError(
+                        f"Zip member would overwrite existing file: {member}")
+            members.append((info, member, abs_dest))
+
+        for info, member, abs_dest in members:
             # Ensure directory exists
             parent = os.path.dirname(abs_dest)
             if parent and not os.path.exists(parent):
@@ -212,6 +223,7 @@ class AkitaZmodemMeshCore:
         self.running = True
         self._mesh_receive_queue = asyncio.Queue()
         self._temp_zips = []  # track temp archives for cleanup
+        self._control_server = None
         # register instance temp files in global list for atexit cleanup
 
         def _register(fp):
@@ -256,6 +268,7 @@ class AkitaZmodemMeshCore:
             ("mesh_serial_baud", int),
             ("mesh_tcp_port", int),
             ("tx_delay_ms", (int, float)),
+            ("control_port", int),
         ]
         for key, typ in fields:
             val = self.app_config.get(key)
@@ -279,6 +292,14 @@ class AkitaZmodemMeshCore:
         if tcp_port is not None and not 1 <= tcp_port <= 65535:
             raise ValueError("mesh_tcp_port must be between 1 and 65535")
 
+        control_port = self.app_config.get("control_port")
+        if control_port is not None and not 0 <= control_port <= 65535:
+            raise ValueError("control_port must be between 0 and 65535")
+
+        control_host = self.app_config.get("control_host")
+        if control_host is not None and not isinstance(control_host, str):
+            raise ValueError("control_host must be a string")
+
         conn_type = self.app_config.get("mesh_connection_type")
         if conn_type not in ("serial", "tcp"):
             raise ValueError("mesh_connection_type must be 'serial' or 'tcp'")
@@ -294,6 +315,93 @@ class AkitaZmodemMeshCore:
             if chunk_size > MESHCORE_MAX_PACKET_PAYLOAD:
                 raise ValueError(
                     f"mesh_packet_chunk_size must be <= {MESHCORE_MAX_PACKET_PAYLOAD}")
+
+    def _transfer_summary(self, tid, transfer):
+        now = time.time()
+        total = transfer.get("total")
+        byte_count = transfer.get("bytes", 0)
+        progress = None
+        if total:
+            progress = min(1.0, byte_count / total)
+        return {
+            "id": tid,
+            "state": transfer.get("state"),
+            "file": transfer.get("file"),
+            "dest": transfer.get("dest"),
+            "bytes": byte_count,
+            "total": total,
+            "progress": progress,
+            "started_at": transfer.get("start"),
+            "last_activity": transfer.get("last_act"),
+            "elapsed_seconds": now - transfer.get("start", now),
+            "idle_seconds": now - transfer.get("last_act", now),
+        }
+
+    def get_status(self, tid=None):
+        if tid is not None:
+            transfer = self.transfers.get(tid)
+            if not transfer:
+                return {"ok": False, "error": f"transfer {tid} not found"}
+            return {"ok": True, "transfer": self._transfer_summary(tid, transfer)}
+        transfers = [
+            self._transfer_summary(tid, transfer)
+            for tid, transfer in sorted(self.transfers.items())
+        ]
+        return {"ok": True, "transfers": transfers}
+
+    async def start_control_server(self):
+        host = self.app_config.get("control_host", DEFAULT_CONFIG["control_host"])
+        port = self.app_config.get("control_port", DEFAULT_CONFIG["control_port"])
+        try:
+            self._control_server = await asyncio.start_server(
+                self._handle_control_client,
+                host,
+                port,
+            )
+        except OSError as e:
+            logging.warning(f"Control server unavailable on {host}:{port}: {e}")
+            return False
+        sockets = self._control_server.sockets or []
+        bound = ", ".join(
+            f"{sock.getsockname()[0]}:{sock.getsockname()[1]}"
+            for sock in sockets)
+        logging.info(f"Control server listening on {bound}")
+        return True
+
+    async def _handle_control_client(self, reader, writer):
+        try:
+            raw = await reader.readline()
+            request = json.loads(raw.decode("utf-8"))
+            command = request.get("command")
+            tid = request.get("id")
+            if tid is not None:
+                tid = int(tid)
+
+            if command == "status":
+                response = self.get_status(tid)
+            elif command == "cancel":
+                if tid is None:
+                    response = {
+                        "ok": False,
+                        "error": "cancel requires a transfer id"}
+                else:
+                    response = {"ok": self.cancel_transfer(tid)}
+                    if not response["ok"]:
+                        response["error"] = f"transfer {tid} not found"
+            else:
+                response = {"ok": False, "error": f"unknown command: {command}"}
+        except Exception as e:
+            response = {"ok": False, "error": str(e)}
+        try:
+            writer.write(
+                (json.dumps(response, default=str) + "\n").encode("utf-8"))
+            await writer.drain()
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
 
     async def _connect_mesh(self):
         conn_type = self.app_config.get("mesh_connection_type", "serial")
@@ -709,7 +817,11 @@ class AkitaZmodemMeshCore:
             if os.path.exists(zip_name):
                 logging.info(f"Extracting to '{path}'...")
                 try:
-                    await asyncio.to_thread(_safe_extract_zip, zip_name, path)
+                    await asyncio.to_thread(
+                        _safe_extract_zip,
+                        zip_name,
+                        path,
+                        overwrite)
                 except UnsafeZipError as e:
                     logging.error(f"Received zip rejected as unsafe: {e}")
                 except Exception as e:
@@ -789,6 +901,13 @@ class AkitaZmodemMeshCore:
 
     async def stop(self):
         self.running = False
+        if self._control_server:
+            self._control_server.close()
+            try:
+                await self._control_server.wait_closed()
+            except Exception:
+                pass
+            self._control_server = None
         for tid in list(self.transfers.keys()):
             self.cancel_transfer(tid)
         if self.mesh:
@@ -800,6 +919,29 @@ class AkitaZmodemMeshCore:
 # -----------------------------------------------------------------------------
 # CLI Entry Point
 # -----------------------------------------------------------------------------
+
+
+async def send_control_command(config, command, transfer_id=None):
+    host = config.get("control_host", DEFAULT_CONFIG["control_host"])
+    port = config.get("control_port", DEFAULT_CONFIG["control_port"])
+    request = {"command": command}
+    if transfer_id is not None:
+        request["id"] = transfer_id
+    try:
+        reader, writer = await asyncio.open_connection(host, port)
+        writer.write((json.dumps(request) + "\n").encode("utf-8"))
+        await writer.drain()
+        raw = await reader.readline()
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        if not raw:
+            return {"ok": False, "error": "control server closed without a response"}
+        return json.loads(raw.decode("utf-8"))
+    except OSError as e:
+        return {"ok": False, "error": f"could not reach control server at {host}:{port}: {e}"}
 
 
 async def main():
@@ -818,6 +960,10 @@ async def main():
                         help="TCP host for meshcore connection (tcp)")
     parser.add_argument("--tcp-port", dest="tcp_port", type=int,
                         help="TCP port for meshcore connection (tcp)")
+    parser.add_argument("--control-host", dest="control_host",
+                        help="Local control host for status/cancel commands")
+    parser.add_argument("--control-port", dest="control_port", type=int,
+                        help="Local control port for status/cancel commands")
 
     sub = parser.add_subparsers(dest="command")
 
@@ -831,7 +977,7 @@ async def main():
     p_recv.add_argument("--directory", action="store_true",
                         help="Force treat the destination as a directory")
 
-    sub.add_parser("status").add_argument("id", type=int)
+    sub.add_parser("status").add_argument("id", type=int, nargs="?")
     sub.add_parser("cancel").add_argument("id", type=int)
 
     args = parser.parse_args()
@@ -847,8 +993,21 @@ async def main():
         overrides["mesh_tcp_host"] = args.tcp_host
     if args.tcp_port is not None:
         overrides["mesh_tcp_port"] = args.tcp_port
+    if args.control_host:
+        overrides["control_host"] = args.control_host
+    if args.control_port is not None:
+        overrides["control_port"] = args.control_port
 
     app = AkitaZmodemMeshCore(overrides, config_file=args.config)
+
+    if args.command in ("status", "cancel"):
+        response = await send_control_command(
+            app.app_config,
+            args.command,
+            getattr(args, "id", None),
+        )
+        print(json.dumps(response, default=str, indent=2))
+        return
 
     # Clean Exit
     def sig_handler():
@@ -870,6 +1029,7 @@ async def main():
     # simply sit idle, but receive commands and the daemon depend on them.
     asyncio.create_task(app._receive_loop_processor())
     asyncio.create_task(app._timeout_check())
+    await app.start_control_server()
 
     cli_event = asyncio.Event()
 
@@ -892,12 +1052,6 @@ async def main():
             else:
                 await app.receive_file(args.path, args.overwrite, cli_event)
             await cli_event.wait()
-
-        elif args.command == "status":
-            print(json.dumps(app.transfers, default=str, indent=2))
-
-        elif args.command == "cancel":
-            app.cancel_transfer(args.id)
 
         else:
             # Daemon -- the work loops are already running above.  simply sleep

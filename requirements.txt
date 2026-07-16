@@ -3,7 +3,7 @@
 # For MeshCore network communication
 # Please ensure the installed 'meshcore' library is compatible with the API used in the script
 # (e.g., fdlamotte/meshcore_py or a similar asyncio-based library with 'create_serial', 'subscribe', 'commands.send_msg')
-meshcore
+meshcore==2.3.7
 
 # Zmodem: implemented in-tree (zmodem.py). No external `zmodem` package
 # is required for normal operation. If you need a full-featured third-party
@@ -11,5 +11,5 @@ meshcore
 # zmodem  # optional
 
 # Optional, for CLI progress bars
-tqdm
+tqdm==4.68.4
 

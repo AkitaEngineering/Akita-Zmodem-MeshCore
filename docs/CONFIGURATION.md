@@ -26,7 +26,7 @@ Here's an explanation of each field in the configuration file:
     * **Valid range**: `3` to `184`  
     * **Default**: `184`
 
-* `"timeout": 120`  
+* `"timeout": 120`
     * **Description**: The duration (in seconds) of inactivity after which an ongoing transfer is considered timed-out and subsequently canceled. Activity is defined as successfully sending or receiving data chunks relevant to the Zmodem transfer.  
     * **Type**: Integer  
     * **Default**: `120`
@@ -51,10 +51,20 @@ Here's an explanation of each field in the configuration file:
     * **Type**: String  
     * **Default**: `"127.0.0.1"`
 
-* `"mesh_tcp_port": 4403`  
-    * **Description**: If `mesh_connection_type` is `"tcp"`, this is the TCP port number for the MeshCore connection. (Note: 4403 is commonly associated with Meshtastic; ensure this is the correct port for your MeshCore TCP service).  
-    * **Type**: Integer  
+* `"mesh_tcp_port": 4403`
+    * **Description**: If `mesh_connection_type` is `"tcp"`, this is the TCP port number for the MeshCore connection. (Note: 4403 is commonly associated with Meshtastic; ensure this is the correct port for your MeshCore TCP service).
+    * **Type**: Integer
     * **Default**: `4403`
+
+* `"control_host": "127.0.0.1"`
+    * **Description**: Local host/interface where the utility listens for `status` and `cancel` control commands while a daemon, send, or receive process is running. Keep this on loopback unless you intentionally expose operational control to another trusted host.
+    * **Type**: String
+    * **Default**: `"127.0.0.1"`
+
+* `"control_port": 8765`
+    * **Description**: Local TCP port used for JSON control commands. `status` and `cancel` connect to this port instead of starting a new MeshCore session.
+    * **Type**: Integer
+    * **Default**: `8765`
 
 ## Command-Line Overrides for Connection Parameters
 
@@ -65,6 +75,8 @@ You can override the MeshCore connection settings from the configuration file us
 * `--serial-baud <BAUDRATE>`: Overrides `mesh_serial_baud`.
 * `--tcp-host <HOST_IP_OR_NAME>`: Overrides `mesh_tcp_host`.
 * `--tcp-port <PORT_NUMBER>`: Overrides `mesh_tcp_port`.
+* `--control-host <HOST_IP_OR_NAME>`: Overrides `control_host`.
+* `--control-port <PORT_NUMBER>`: Overrides `control_port`.
 
 **Example:**
 

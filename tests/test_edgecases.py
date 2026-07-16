@@ -63,6 +63,25 @@ def test_safe_extract_zip_memory(tmp_path):
     assert (out / 'file999.txt').exists()
 
 
+def test_safe_extract_zip_rejects_existing_file_without_overwrite(tmp_path):
+    zip_path = tmp_path / "incoming.zip"
+    import zipfile
+    with zipfile.ZipFile(str(zip_path), 'w') as z:
+        z.writestr('same.txt', 'new')
+        z.writestr('other.txt', 'other')
+
+    out = tmp_path / "out"
+    out.mkdir()
+    existing = out / "same.txt"
+    existing.write_text("old")
+
+    with pytest.raises(FileExistsError):
+        _safe_extract_zip(str(zip_path), str(out), overwrite=False)
+
+    assert existing.read_text() == "old"
+    assert not (out / "other.txt").exists()
+
+
 @pytest.mark.asyncio
 async def test_receive_file_rejects_blocked_parent_path(tmp_path):
     # Simulate a parent path that cannot be created because a file is present.

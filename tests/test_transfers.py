@@ -298,6 +298,67 @@ def test_configuration_file_override(tmp_path):
     assert app.zmodem_app_port == 54321
 
 
+@pytest.mark.asyncio
+async def test_control_server_reports_and_cancels_transfer(tmp_path):
+    from akita_zmodem_meshcore import AkitaZmodemMeshCore
+
+    app = AkitaZmodemMeshCore(
+        {"control_host": "127.0.0.1", "control_port": 0}
+    )
+    tid = app.generate_transfer_id()
+    app.transfers[tid] = {
+        "state": "sending",
+        "file": str(tmp_path / "payload.bin"),
+        "dest": "peer",
+        "start": 100.0,
+        "last_act": 101.0,
+        "bytes": 5,
+        "total": 10,
+    }
+
+    class FakeReader:
+        def __init__(self, request):
+            self.request = request
+
+        async def readline(self):
+            return (json.dumps(self.request) + "\n").encode("utf-8")
+
+    class FakeWriter:
+        def __init__(self):
+            self.data = b""
+            self.closed = False
+
+        def write(self, data):
+            self.data += data
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            return None
+
+    async def request(payload):
+        writer = FakeWriter()
+        await app._handle_control_client(FakeReader(payload), writer)
+        return json.loads(writer.data.decode("utf-8"))
+
+    status = await request({"command": "status", "id": tid})
+    assert status["ok"] is True
+    assert status["transfer"]["id"] == tid
+    assert status["transfer"]["state"] == "sending"
+    assert status["transfer"]["progress"] == 0.5
+
+    cancelled = await request({"command": "cancel", "id": tid})
+    assert cancelled == {"ok": True}
+    assert tid not in app.transfers
+
+    missing = await request({"command": "status", "id": tid})
+    assert missing["ok"] is False
+
+
 def _simulate_zmodem_exchange(sender, receiver):
     """Helper loop to exchange packets until both sides are finished."""
     # both sides may generate responses that need to be fed back

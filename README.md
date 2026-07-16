@@ -85,9 +85,9 @@ All other functionality is self‑contained within the repository.
 
 ## Configuration
 
-1.  **Generate Configuration File**: The configuration file `akita_zmodem_meshcore_config.json` will be created with default settings in the same directory as the script if it doesn't exist on the first run.
+1.  **Generate Configuration File**: The configuration file `akita_zmodem_meshcore_config.json` will be created with default settings in the same directory as the script if it doesn't exist when you run a command that initializes the application.
     ```bash
-    python akita_zmodem_meshcore.py --help # Running with --help or any command will generate it
+    python akita_zmodem_meshcore.py status
     ```
 
 2.  **Edit Configuration**: Modify `akita_zmodem_meshcore_config.json` to suit your needs. Key settings include:
@@ -97,6 +97,7 @@ All other functionality is self‑contained within the repository.
     * `mesh_connection_type`: How to connect to your MeshCore device (`serial` or `tcp`).
     * `mesh_serial_port`, `mesh_serial_baud`: Settings for serial connection.
     * `mesh_tcp_host`, `mesh_tcp_port`: Settings for TCP connection.
+    * `control_host`, `control_port`: Local control socket used by `status` and `cancel`.
 
     These MeshCore connection settings can also be overridden via CLI arguments. See `docs/CONFIGURATION.md` for more details.
 
@@ -117,6 +118,8 @@ Global Options (Optional, override config file):
 --serial-baud <BAUDRATE>
 --tcp-host <HOST_IP_OR_NAME>
 --tcp-port <PORT_NUMBER>
+--control-host <HOST_IP_OR_NAME>
+--control-port <PORT_NUMBER>
 ```
 
 Commands:
@@ -149,13 +152,13 @@ python akita_zmodem_meshcore.py receive <path/to/save_location> [--overwrite] [-
 
 Note: For directory reception, provide the path where the directory's contents should be extracted.
 
-Get transfer status:
+Get active transfer status from the running daemon/process:
 
 ```bash
-python akita_zmodem_meshcore.py status <transfer_id>
+python akita_zmodem_meshcore.py status [transfer_id]
 ```
 
-Cancel a transfer:
+Cancel a transfer in the running daemon/process:
 
 ```bash
 python akita_zmodem_meshcore.py cancel <transfer_id>
