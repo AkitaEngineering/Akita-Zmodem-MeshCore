@@ -79,6 +79,10 @@ except Exception:
 # -----------------------------------------------------------------------------
 CONFIG_FILE = "akita_zmodem_meshcore_config.json"
 MESHCORE_MAX_PACKET_PAYLOAD = 184
+MAX_ZMODEM_CHUNK_SIZE = 4096
+APP_PORT_HEADER_FORMAT = "!H"
+APP_PORT_HEADER_SIZE = struct.calcsize(APP_PORT_HEADER_FORMAT)
+MIN_MESH_PACKET_CHUNK_SIZE = APP_PORT_HEADER_SIZE + 16
 DEFAULT_CONFIG = {
     "zmodem_app_port": 2001,
     # Internal protocol data block size. Mesh packets are still fragmented
@@ -93,12 +97,14 @@ DEFAULT_CONFIG = {
     "mesh_tcp_host": "127.0.0.1",
     "mesh_tcp_port": 4403,
     "tx_delay_ms": 150,            # Throttle to prevent radio saturation
+    "min_tx_delay_ms": 50,
+    "allow_unsafe_tx_delay": False,
+    "max_consecutive_send_failures": 5,
+    "max_inbound_queue": 128,
+    "max_file_size_bytes": 0,
     "control_host": "127.0.0.1",
     "control_port": 8765
 }
-
-APP_PORT_HEADER_FORMAT = "!H"
-APP_PORT_HEADER_SIZE = struct.calcsize(APP_PORT_HEADER_FORMAT)
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -221,7 +227,7 @@ class AkitaZmodemMeshCore:
         self.transfers = {}
         self.transfer_id_counter = 0
         self.running = True
-        self._mesh_receive_queue = asyncio.Queue()
+        self._mesh_receive_queue = None
         self._temp_zips = []  # track temp archives for cleanup
         self._control_server = None
         # register instance temp files in global list for atexit cleanup
@@ -235,6 +241,10 @@ class AkitaZmodemMeshCore:
         if cli_config_overrides:
             self.app_config.update(cli_config_overrides)
         self._validate_config()
+        self._mesh_receive_queue = asyncio.Queue(
+            maxsize=self.app_config.get(
+                "max_inbound_queue",
+                DEFAULT_CONFIG["max_inbound_queue"]))
 
         # compute frequently-used values once per instance
         self.zmodem_app_port = self.app_config.get(
@@ -245,6 +255,11 @@ class AkitaZmodemMeshCore:
             "timeout", DEFAULT_CONFIG["timeout"])
         self.tx_delay_s = self.app_config.get(
             "tx_delay_ms", DEFAULT_CONFIG["tx_delay_ms"]) / 1000.0
+        self.max_consecutive_send_failures = self.app_config.get(
+            "max_consecutive_send_failures",
+            DEFAULT_CONFIG["max_consecutive_send_failures"])
+        self.max_file_size_bytes = self.app_config.get(
+            "max_file_size_bytes", DEFAULT_CONFIG["max_file_size_bytes"])
 
         # update module globals so tests relying on them remain valid
         global config_data, ZMODEM_APP_PORT, MESH_PACKET_CHUNK_SIZE, TIMEOUT, TX_DELAY_S
@@ -268,6 +283,10 @@ class AkitaZmodemMeshCore:
             ("mesh_serial_baud", int),
             ("mesh_tcp_port", int),
             ("tx_delay_ms", (int, float)),
+            ("min_tx_delay_ms", (int, float)),
+            ("max_consecutive_send_failures", int),
+            ("max_inbound_queue", int),
+            ("max_file_size_bytes", int),
             ("control_port", int),
         ]
         for key, typ in fields:
@@ -281,8 +300,15 @@ class AkitaZmodemMeshCore:
                     "timeout") and val is not None:
                 if val <= 0:
                     raise ValueError(f"{key} must be positive")
-            if key == "tx_delay_ms" and val is not None and val < 0:
-                raise ValueError("tx_delay_ms must be zero or positive")
+            if key in (
+                    "tx_delay_ms",
+                    "min_tx_delay_ms",
+                    "max_file_size_bytes") and val is not None and val < 0:
+                raise ValueError(f"{key} must be zero or positive")
+            if key in (
+                    "max_consecutive_send_failures",
+                    "max_inbound_queue") and val is not None and val <= 0:
+                raise ValueError(f"{key} must be positive")
 
         app_port = self.app_config.get("zmodem_app_port")
         if app_port is not None and not 0 <= app_port <= 65535:
@@ -307,14 +333,34 @@ class AkitaZmodemMeshCore:
         if self.app_config.get("mesh_serial_baud", 1) <= 0:
             raise ValueError("mesh_serial_baud must be positive")
 
-        chunk_size = self.app_config.get("mesh_packet_chunk_size")
-        if chunk_size is not None:
-            if chunk_size <= APP_PORT_HEADER_SIZE:
+        protocol_chunk_size = self.app_config.get("chunk_size")
+        if protocol_chunk_size is not None:
+            if protocol_chunk_size > MAX_ZMODEM_CHUNK_SIZE:
                 raise ValueError(
-                    "mesh_packet_chunk_size must exceed the app-port header size")
-            if chunk_size > MESHCORE_MAX_PACKET_PAYLOAD:
+                    f"chunk_size must be <= {MAX_ZMODEM_CHUNK_SIZE}")
+
+        mesh_chunk_size = self.app_config.get("mesh_packet_chunk_size")
+        if mesh_chunk_size is not None:
+            if mesh_chunk_size < MIN_MESH_PACKET_CHUNK_SIZE:
+                raise ValueError(
+                    f"mesh_packet_chunk_size must be >= {MIN_MESH_PACKET_CHUNK_SIZE}")
+            if mesh_chunk_size > MESHCORE_MAX_PACKET_PAYLOAD:
                 raise ValueError(
                     f"mesh_packet_chunk_size must be <= {MESHCORE_MAX_PACKET_PAYLOAD}")
+
+        allow_unsafe_tx_delay = self.app_config.get(
+            "allow_unsafe_tx_delay", False)
+        if not isinstance(allow_unsafe_tx_delay, bool):
+            raise ValueError("allow_unsafe_tx_delay must be a boolean")
+
+        tx_delay_ms = self.app_config.get(
+            "tx_delay_ms", DEFAULT_CONFIG["tx_delay_ms"])
+        min_tx_delay_ms = self.app_config.get(
+            "min_tx_delay_ms", DEFAULT_CONFIG["min_tx_delay_ms"])
+        if tx_delay_ms < min_tx_delay_ms and not allow_unsafe_tx_delay:
+            raise ValueError(
+                "tx_delay_ms must be >= min_tx_delay_ms unless "
+                "allow_unsafe_tx_delay is true")
 
     def _transfer_summary(self, tid, transfer):
         now = time.time()
@@ -348,6 +394,17 @@ class AkitaZmodemMeshCore:
             for tid, transfer in sorted(self.transfers.items())
         ]
         return {"ok": True, "transfers": transfers}
+
+    def _looks_like_zmodem_start(self, data):
+        if len(data) < 7:
+            return False
+        frame_len = struct.unpack("!I", data[:4])[0]
+        if frame_len > zmodem.MAX_FRAME_PAYLOAD:
+            return False
+        if data[4:5] != b"S":
+            return False
+        name_len = struct.unpack("!H", data[5:7])[0]
+        return frame_len == 1 + 2 + name_len + 8
 
     async def start_control_server(self):
         host = self.app_config.get("control_host", DEFAULT_CONFIG["control_host"])
@@ -451,7 +508,13 @@ class AkitaZmodemMeshCore:
                     data = txt
 
             if data and isinstance(data, bytes):
-                await self._mesh_receive_queue.put({"source": src, "data": data})
+                try:
+                    self._mesh_receive_queue.put_nowait(
+                        {"source": src, "data": data})
+                except asyncio.QueueFull:
+                    logging.warning(
+                        "Inbound mesh queue full; dropping packet from %s",
+                        src)
         except Exception as e:
             logging.error(f"Msg Parse Error: {e}")
 
@@ -486,6 +549,13 @@ class AkitaZmodemMeshCore:
 
         tid = self.generate_transfer_id()
         fsize = os.path.getsize(filepath)
+        if self.max_file_size_bytes and fsize > self.max_file_size_bytes:
+            logging.error(
+                f"File too large: {fsize:,} bytes exceeds max_file_size_bytes "
+                f"({self.max_file_size_bytes:,})")
+            if cli_event:
+                cli_event.set()
+            return None
         # calculate checksum in a thread to avoid blocking the event loop
         checksum = await asyncio.to_thread(calculate_md5, filepath)
         fname = os.path.basename(filepath)
@@ -535,7 +605,10 @@ class AkitaZmodemMeshCore:
                 leave=True)
 
         try:
+            consecutive_failures = 0
             while self.running:
+                if tid not in self.transfers:
+                    break
                 if await asyncio.to_thread(sender.is_finished):
                     logging.info(f"[Tx-{tid}] Transfer Complete.")
                     break
@@ -564,11 +637,20 @@ class AkitaZmodemMeshCore:
                             logging.debug(
                                 f"[Tx-{tid}] sending chunk {len(chunk)}")
                             await self.mesh.commands.send_msg(destination=dest, payload=chunk)
+                            consecutive_failures = 0
                             t["last_act"] = time.time()
                             # Throttle
                             await asyncio.sleep(self.tx_delay_s)
                         except Exception as e:
+                            consecutive_failures += 1
                             logging.warning(f"[Tx-{tid}] Send Fail: {e}")
+                            if (
+                                    consecutive_failures
+                                    >= self.max_consecutive_send_failures):
+                                logging.error(
+                                    f"[Tx-{tid}] Too many consecutive send "
+                                    "failures; cancelling transfer")
+                                return
                             await asyncio.sleep(1.0)  # Backoff
 
                     if pbar:
@@ -644,6 +726,12 @@ class AkitaZmodemMeshCore:
         # scan transfers and, if this is a new incoming stream, initialize it
         for tid, t in list(self.transfers.items()):
             if t["state"] == "waiting":
+                if not self._looks_like_zmodem_start(data):
+                    logging.warning(
+                        "[Rx-%s] Ignoring non-ZMODEM start from %s",
+                        tid,
+                        src)
+                    return
                 # Do not pre-open the destination file (which could truncate
                 # it). Instead create a Receiver that manages its own file
                 # handle and resume detection based on the filepath.

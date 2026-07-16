@@ -15,21 +15,52 @@ Here's an explanation of each field in the configuration file:
     * **Type**: Integer  
     * **Default**: `2001`
 
-* `"chunk_size": 256`  
-    * **Description**: The size of blocks read from the file by the internal Zmodem sender implementation.  (In previous versions this parameter was only passed through to an external zmodem library, so its effect depended on that library.)  The mesh network still chunks the data further according to `mesh_packet_chunk_size`.  
-    * **Type**: Integer  
+* `"chunk_size": 256`
+    * **Description**: The size of blocks read from the file by the internal Zmodem sender implementation. The mesh network still chunks the data further according to `mesh_packet_chunk_size`. Values above `4096` are rejected to avoid creating large protocol frames that fragment heavily over the mesh.
+    * **Type**: Integer
+    * **Valid range**: `1` to `4096`
     * **Default**: `256`
 
 * `"mesh_packet_chunk_size": 184`  
     * **Description**: The maximum size (in bytes) of the payload for a single packet sent over the MeshCore network, including the prepended `zmodem_app_port`. MeshCore firmware currently caps packet payloads at 184 bytes, so larger values are rejected by the application configuration. Zmodem protocol packets can be larger than what the underlying mesh radio can handle in one go, and this setting controls how those protocol data units are split into mesh-sized chunks.  
     * **Type**: Integer  
-    * **Valid range**: `3` to `184`  
+    * **Valid range**: `18` to `184`
     * **Default**: `184`
 
 * `"timeout": 120`
-    * **Description**: The duration (in seconds) of inactivity after which an ongoing transfer is considered timed-out and subsequently canceled. Activity is defined as successfully sending or receiving data chunks relevant to the Zmodem transfer.  
-    * **Type**: Integer  
+    * **Description**: The duration (in seconds) of inactivity after which an ongoing transfer is considered timed-out and subsequently canceled. Activity is defined as successfully sending or receiving data chunks relevant to the Zmodem transfer.
+    * **Type**: Integer
     * **Default**: `120`
+
+* `"tx_delay_ms": 150`
+    * **Description**: Delay between mesh packet sends. This pacing is the main protection against flooding a low-bandwidth mesh.
+    * **Type**: Integer or float
+    * **Default**: `150`
+
+* `"min_tx_delay_ms": 50`
+    * **Description**: Minimum allowed `tx_delay_ms` unless `allow_unsafe_tx_delay` is explicitly set to `true`.
+    * **Type**: Integer or float
+    * **Default**: `50`
+
+* `"allow_unsafe_tx_delay": false`
+    * **Description**: Allows `tx_delay_ms` below `min_tx_delay_ms` for controlled lab testing. Keep this `false` on shared or operational mesh networks.
+    * **Type**: Boolean
+    * **Default**: `false`
+
+* `"max_consecutive_send_failures": 5`
+    * **Description**: Cancels a transfer after this many consecutive `send_msg` failures instead of retrying indefinitely.
+    * **Type**: Integer
+    * **Default**: `5`
+
+* `"max_inbound_queue": 128`
+    * **Description**: Maximum number of inbound mesh packets buffered for processing. Additional packets are dropped with a warning when the queue is full.
+    * **Type**: Integer
+    * **Default**: `128`
+
+* `"max_file_size_bytes": 0`
+    * **Description**: Maximum file size allowed for sends. `0` disables the limit. Set this to a site-appropriate value to prevent accidental large transfers on constrained links.
+    * **Type**: Integer
+    * **Default**: `0`
 
 * `"mesh_connection_type": "serial"`  
     * **Description**: Specifies the method used to connect to the local MeshCore device/interface that the `meshcore_py` library will use.  

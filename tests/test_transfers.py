@@ -139,6 +139,24 @@ async def test_send_file_rejects_empty_destination(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_send_file_rejects_configured_max_size(tmp_path):
+    from akita_zmodem_meshcore import AkitaZmodemMeshCore
+
+    fp = tmp_path / "too_large.bin"
+    fp.write_bytes(b"0123456789")
+
+    app = AkitaZmodemMeshCore({"max_file_size_bytes": 5})
+    app.mesh = MockMesh()
+
+    cli_event = asyncio.Event()
+    tid = await app.send_file('destnode', str(fp), cli_event)
+
+    assert tid is None
+    assert cli_event.is_set()
+    assert app.mesh.commands.sent == []
+
+
+@pytest.mark.asyncio
 async def test_send_file_chunks_use_destination_and_only_prefix_header(monkeypatch, tmp_path):
     import akita_zmodem_meshcore
     from akita_zmodem_meshcore import AkitaZmodemMeshCore, APP_PORT_HEADER_FORMAT
@@ -216,6 +234,7 @@ async def test_receive_handler_replies_unicast_to_source(monkeypatch, tmp_path):
     tid = await app.receive_file(str(dest), overwrite=True)
 
     assert tid is not None
+    app._looks_like_zmodem_start = lambda data: True
 
     await app._handle_zmodem_data('node123', b'MOCKDATA')
 
@@ -235,6 +254,7 @@ async def test_receive_file_writes_and_cleans(tmp_path):
     cli_event = asyncio.Event()
     tid = await app.receive_file(str(dest), overwrite=True, cli_event=cli_event)
     assert tid is not None
+    app._looks_like_zmodem_start = lambda data: True
 
     # start the background listener (CLI would have done this automatically)
     asyncio.create_task(app._receive_loop_processor())

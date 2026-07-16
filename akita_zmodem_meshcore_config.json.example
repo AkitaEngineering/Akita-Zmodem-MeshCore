@@ -9,6 +9,11 @@
     "mesh_tcp_host": "127.0.0.1",
     "mesh_tcp_port": 4403,
     "tx_delay_ms": 150,
+    "min_tx_delay_ms": 50,
+    "allow_unsafe_tx_delay": false,
+    "max_consecutive_send_failures": 5,
+    "max_inbound_queue": 128,
+    "max_file_size_bytes": 0,
     "control_host": "127.0.0.1",
     "control_port": 8765
 }

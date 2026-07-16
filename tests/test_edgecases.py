@@ -49,6 +49,31 @@ def test_validate_config_rejects_oversized_mesh_chunk(tmp_path):
         AkitaZmodemMeshCore(config_file=str(cfg))
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"mesh_packet_chunk_size": 17}',
+        '{"chunk_size": 4097}',
+        '{"tx_delay_ms": 0}',
+        '{"max_consecutive_send_failures": 0}',
+        '{"max_inbound_queue": 0}',
+        '{"max_file_size_bytes": -1}',
+    ],
+)
+def test_validate_config_rejects_network_risk_values(tmp_path, content):
+    cfg = tmp_path / "bad_network.json"
+    cfg.write_text(content)
+    with pytest.raises(ValueError):
+        AkitaZmodemMeshCore(config_file=str(cfg))
+
+
+def test_validate_config_allows_explicit_unsafe_tx_delay_override(tmp_path):
+    cfg = tmp_path / "lab.json"
+    cfg.write_text('{"tx_delay_ms": 0, "allow_unsafe_tx_delay": true}')
+    app = AkitaZmodemMeshCore(config_file=str(cfg))
+    assert app.tx_delay_s == 0
+
+
 def test_safe_extract_zip_memory(tmp_path):
     # a large zip with many entries should still be handled; just ensure no
     # crash
@@ -129,6 +154,7 @@ async def test_handle_zmodem_data_receiver_init_failure(tmp_path, monkeypatch):
             return False
 
     monkeypatch.setattr('zmodem.Receiver', DummyRecv)
+    app._looks_like_zmodem_start = lambda data: True
     # run handler with dummy data
     await app._handle_zmodem_data('peer', b'hello')
     # transfer should have been cancelled
@@ -202,6 +228,20 @@ async def test_receive_file_creates_parent_directory(tmp_path):
 
     assert tid is not None
     assert dest.parent.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_handle_zmodem_data_ignores_non_start_payload(tmp_path):
+    app = AkitaZmodemMeshCore()
+    app.mesh = object()
+    dest = tmp_path / "incoming.bin"
+    tid = await app.receive_file(str(dest), overwrite=True)
+
+    await app._handle_zmodem_data('peer', b'not-zmodem')
+
+    assert tid in app.transfers
+    assert app.transfers[tid]["state"] == "waiting"
+    assert not dest.exists()
 
 
 @pytest.mark.asyncio

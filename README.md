@@ -94,6 +94,8 @@ All other functionality is self‑contained within the repository.
     * `zmodem_app_port`: An application-level port number used to distinguish Zmodem traffic over MeshCore.
     * `mesh_packet_chunk_size`: Maximum size of data chunks sent over the mesh network, including the prepended app-port header. The valid MeshCore-safe range is greater than the 2-byte header size and at most `184` bytes.
     * `timeout`: Transfer timeout in seconds.
+    * `tx_delay_ms`, `min_tx_delay_ms`: Packet pacing controls that help prevent radio saturation.
+    * `max_consecutive_send_failures`, `max_inbound_queue`, `max_file_size_bytes`: Safety limits for failed sends, receive backlogs, and accidental oversized transfers.
     * `mesh_connection_type`: How to connect to your MeshCore device (`serial` or `tcp`).
     * `mesh_serial_port`, `mesh_serial_baud`: Settings for serial connection.
     * `mesh_tcp_host`, `mesh_tcp_port`: Settings for TCP connection.

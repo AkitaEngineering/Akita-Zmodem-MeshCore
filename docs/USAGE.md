@@ -215,8 +215,18 @@ Tips:
 - **Transfer IDs**: These are logged when a transfer starts and are required for `status` and `cancel` commands.
 
 - **Mesh Packet Size**: If you tune `mesh_packet_chunk_size`, keep it above the
-  2-byte app-port header and at or below `184` bytes unless the underlying
+  2-byte app-port header plus the first protocol bytes and at or below `184` bytes unless the underlying
   MeshCore payload limit changes.
+
+- **Flood Protection**: Keep `tx_delay_ms` at or above `min_tx_delay_ms` on
+  shared networks. The application rejects lower values unless
+  `allow_unsafe_tx_delay` is explicitly enabled, cancels transfers after
+  repeated send failures, drops inbound packets when the processing queue is
+  full, and ignores receive-slot traffic that does not look like a ZMODEM
+  start frame.
+
+- **Large Transfers**: Set `max_file_size_bytes` for operational deployments
+  where an accidental large send would monopolize the mesh.
 
 - **Single CLI Operation at a Time**: CLI usage focuses on one transfer at a time. For general listening or background operation, run the utility in daemon mode (i.e., without a command).
 
