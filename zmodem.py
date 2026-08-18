@@ -64,6 +64,30 @@ def _deframe(buffer: bytearray):
         del buffer[:4 + length + 4]
 
 
+def parse_start_header(data: bytes):
+    """Return ``(filename, size)`` if *data* begins with a START frame.
+
+    The 4-byte CRC at the end of the frame is not required; only the
+    filename and filesize fields need to be present.
+    """
+    if not data or len(data) < 7:
+        return None
+    if data[4:5] != _START:
+        return None
+    frame_len = struct.unpack("!I", data[:4])[0]
+    name_len = struct.unpack("!H", data[5:7])[0]
+    if frame_len != 1 + 2 + name_len + 8:
+        return None
+    if len(data) < 7 + name_len + 8:
+        return None
+    try:
+        filename = data[7:7 + name_len].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    size = struct.unpack("!Q", data[7 + name_len:7 + name_len + 8])[0]
+    return filename, size
+
+
 class Sender:
     def __init__(self, fobj, chunk_size: int = 256):
         self.fobj = fobj
@@ -75,14 +99,27 @@ class Sender:
         self._finished = False
         self._queue = []      # outgoing packet queue
         self._inbuf = bytearray()
+        self._last_packet = b""
+        self.last_payload_bytes = 0
         self.state = 'init'
 
     def is_finished(self):
         return self._finished
 
+    def peek_retransmit(self):
+        """Last packet, if still waiting for an ACK/END confirmation."""
+        if self.state in ('waiting_ack', 'waiting_end_ack') and self._last_packet:
+            return self._last_packet
+        return b""
+
+    def _emit(self, packet, payload_bytes=0):
+        self._last_packet = packet
+        self.last_payload_bytes = payload_bytes
+        return packet
+
     def get_next_packet(self):
         if self._queue:
-            return self._queue.pop(0)
+            return self._emit(self._queue.pop(0))
         if self.state == 'init':
             # send START header
             encoded_name = self.filename.encode('utf-8')
@@ -94,26 +131,26 @@ class Sender:
                 + encoded_name
             )
             payload += struct.pack("!Q", self.filesize)
-            self._queue.append(_frame(payload))
             self.state = 'waiting_ack'
-            return self._queue.pop(0)
+            return self._emit(_frame(payload))
         if self.state == 'sending':
             # ensure file position matches current offset
             try:
                 self.fobj.seek(self.offset)
-            except Exception:
-                pass
+            except OSError as e:
+                logging.warning(
+                    "Sender: seek failed at offset %s: %s", self.offset, e)
+                return b""
             data = self.fobj.read(self.chunk_size)
             if not data:
-                self._queue.append(_frame(_END))
                 self.state = 'waiting_end_ack'
-                return self._queue.pop(0)
+                return self._emit(_frame(_END))
             payload = _DATA + struct.pack("!Q", self.offset) + data
             self.offset += len(data)
-            return _frame(payload)
-        if self.state in ('finished', 'waiting_end_ack'):
+            self.state = 'waiting_ack'
+            return self._emit(_frame(payload), len(data))
+        if self.state in ('finished', 'waiting_end_ack', 'waiting_ack'):
             return b""
-        # in waiting_ack or other states, nothing to send until ack arrives
         return b""
 
     def receive(self, data: bytes):
@@ -125,57 +162,63 @@ class Sender:
         for payload in _deframe(self._inbuf):
             tp = payload[:1]
             if tp == _ACK:
-                if len(payload) < 9:
-                    logging.debug("Sender.receive: short ACK frame ignored")
-                    continue
-                off = struct.unpack("!Q", payload[1:9])[0]
-                # remote acknowledges up to off. Duplicate delivery is common
-                # on MeshCore routes, so ignore anything older than the last
-                # confirmed offset.
-                if off < 0:
-                    off = 0
-                if off > self.filesize:
-                    off = self.filesize
-                if off < self.acked_offset:
-                    logging.debug(
-                        "Sender.receive: stale ACK ignored (off=%d acked=%d)",
-                        off, self.acked_offset)
-                    continue
-                self.acked_offset = off
-                if off > self.offset:
-                    self.offset = off
-                    try:
-                        self.fobj.seek(self.offset)
-                    except Exception:
-                        pass
-                self.state = 'sending'
+                self._on_ack(payload)
             elif tp == _RESUME:
-                if len(payload) < 9:
-                    logging.debug("Sender.receive: short RESUME frame ignored")
-                    continue
-                off = struct.unpack("!Q", payload[1:9])[0]
-                # Clamp resume offset to valid range before seeking. Ignore
-                # resume requests that predate already-acknowledged progress.
-                if off < 0:
-                    off = 0
-                if off > self.filesize:
-                    off = self.filesize
-                if off < self.acked_offset:
-                    logging.debug(
-                        "Sender.receive: stale RESUME ignored (off=%d acked=%d)",
-                        off, self.acked_offset)
-                    continue
-                self.offset = off
-                try:
-                    self.fobj.seek(off)
-                except Exception:
-                    pass
-                self.state = 'sending'
+                self._on_resume(payload)
             elif tp == _END:
                 self.state = 'finished'
                 self._finished = True
             # other control frames ignored
         return out
+
+    def _seek_to(self, offset):
+        try:
+            self.fobj.seek(offset)
+        except OSError as e:
+            logging.warning("Sender: seek failed at offset %s: %s", offset, e)
+
+    def _on_ack(self, payload):
+        if len(payload) < 9:
+            logging.debug("Sender.receive: short ACK frame ignored")
+            return
+        off = struct.unpack("!Q", payload[1:9])[0]
+        # remote acknowledges up to off. Duplicate delivery is common
+        # on MeshCore routes, so ignore anything older than the last
+        # confirmed offset.
+        if off < 0:
+            off = 0
+        if off > self.filesize:
+            off = self.filesize
+        if off < self.acked_offset:
+            logging.debug(
+                "Sender.receive: stale ACK ignored (off=%d acked=%d)",
+                off, self.acked_offset)
+            return
+        self.acked_offset = off
+        if off > self.offset:
+            self.offset = off
+            self._seek_to(self.offset)
+        self.state = 'sending'
+
+    def _on_resume(self, payload):
+        if len(payload) < 9:
+            logging.debug("Sender.receive: short RESUME frame ignored")
+            return
+        off = struct.unpack("!Q", payload[1:9])[0]
+        # Clamp resume offset to valid range before seeking. Ignore
+        # resume requests that predate already-acknowledged progress.
+        if off < 0:
+            off = 0
+        if off > self.filesize:
+            off = self.filesize
+        if off < self.acked_offset:
+            logging.debug(
+                "Sender.receive: stale RESUME ignored (off=%d acked=%d)",
+                off, self.acked_offset)
+            return
+        self.offset = off
+        self._seek_to(off)
+        self.state = 'sending'
 
 
 class Receiver:
@@ -197,6 +240,7 @@ class Receiver:
         self.state = 'waiting'   # waiting for START header
         self.offset = 0
         self.expected_size = None
+        self.filename = None
 
     def is_finished(self):
         return self.state == 'done'
@@ -210,121 +254,101 @@ class Receiver:
         for payload in _deframe(self._inbuf):
             tp = payload[:1]
             if tp == _START:
-                if len(payload) < 11:
-                    logging.debug("Receiver.receive: short START frame ignored")
-                    continue
-                name_len = struct.unpack("!H", payload[1:3])[0]
-                if len(payload) < 3 + name_len + 8:
-                    logging.debug("Receiver.receive: truncated START frame ignored")
-                    continue
-                size = struct.unpack("!Q",
-                                     payload[3 + name_len:3 + name_len + 8])[0]
-                self.expected_size = size
-                # decide on resume
-                # Determine existing size from filepath (if available) or
-                # from the provided file object.  If the caller previously
-                # opened the file with 'wb' we would have truncated it, so
-                # prefer using a filepath and letting Receiver manage opens
-                # to correctly support resume.
-                existing = 0
-                target_name = None
-                if self.filepath:
-                    target_name = self.filepath
-                elif self.fobj and hasattr(self.fobj, 'name'):
-                    target_name = self.fobj.name
-
-                if target_name:
-                    try:
-                        existing = os.path.getsize(target_name)
-                    except OSError:
-                        existing = 0
-
-                if existing and existing < size:
-                    # resume: open for append
-                    self.offset = existing
-                    if target_name:
-                        # close any previously opened handle
-                        try:
-                            if self.fobj:
-                                try:
-                                    self.fobj.close()
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-                        self.fobj = open(target_name, 'ab')
-                    elif self.fobj:
-                        try:
-                            self.fobj.seek(self.offset)
-                        except Exception:
-                            pass
-                    resp = _RESUME + struct.pack("!Q", self.offset)
-                else:
-                    # start fresh: open for write (truncate)
-                    if target_name:
-                        try:
-                            if self.fobj:
-                                try:
-                                    self.fobj.close()
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-                        self.fobj = open(target_name, 'wb')
-                    elif self.fobj:
-                        try:
-                            self.fobj.seek(0)
-                        except Exception:
-                            pass
-                        try:
-                            self.fobj.truncate(0)
-                        except Exception:
-                            pass
-                    self.offset = 0
-                    resp = _ACK + struct.pack("!Q", self.offset)
-                out += _frame(resp)
-                self.state = 'receiving'
+                out += self._on_start(payload)
             elif tp == _DATA and self.state == 'receiving':
-                if len(payload) < 9:
-                    logging.debug("Receiver.receive: short DATA frame ignored")
-                    continue
-                off = struct.unpack("!Q", payload[1:9])[0]
-                chunk = payload[9:]
-                if off != self.offset:
-                    # out-of-order: request resume
-                    resp = _RESUME + struct.pack("!Q", self.offset)
-                    out += _frame(resp)
-                else:
-                    # Ensure we have an open file handle before writing
-                    if self.fobj is None:
-                        if not self.filepath:
-                            resp = _RESUME + struct.pack("!Q", self.offset)
-                            out += _frame(resp)
-                            continue
-                        # attempt to open in append mode
-                        try:
-                            self.fobj = open(self.filepath, 'ab')
-                        except Exception:
-                            # cannot open file; request resume (no change)
-                            resp = _RESUME + struct.pack("!Q", self.offset)
-                            out += _frame(resp)
-                            continue
-                    self.fobj.write(chunk)
-                    self.fobj.flush()
-                    self.offset += len(chunk)
-                    resp = _ACK + struct.pack("!Q", self.offset)
-                    out += _frame(resp)
+                out += self._on_data(payload)
             elif tp == _END and self.state == 'receiving':
-                if self.expected_size is not None and self.offset != self.expected_size:
-                    resp = _RESUME + struct.pack("!Q", self.offset)
-                    out += _frame(resp)
-                    continue
-                self.state = 'done'
-                try:
-                    if self.fobj:
-                        self.fobj.close()
-                except Exception:
-                    pass
-                # final ack
-                out += _frame(_END)
+                out += self._on_end()
         return out
+
+    def _target_name(self):
+        if self.filepath:
+            return self.filepath
+        if self.fobj and hasattr(self.fobj, 'name'):
+            return self.fobj.name
+        return None
+
+    def _close_fobj(self):
+        if not self.fobj:
+            return
+        try:
+            self.fobj.close()
+        except Exception:
+            pass
+        self.fobj = None
+
+    def _on_start(self, payload):
+        if len(payload) < 11:
+            logging.debug("Receiver.receive: short START frame ignored")
+            return b""
+        name_len = struct.unpack("!H", payload[1:3])[0]
+        if len(payload) < 3 + name_len + 8:
+            logging.debug("Receiver.receive: truncated START frame ignored")
+            return b""
+        try:
+            self.filename = payload[3:3 + name_len].decode("utf-8")
+        except UnicodeDecodeError:
+            self.filename = None
+        size = struct.unpack("!Q",
+                             payload[3 + name_len:3 + name_len + 8])[0]
+        self.expected_size = size
+        target_name = self._target_name()
+        existing = 0
+        if target_name:
+            try:
+                existing = os.path.getsize(target_name)
+            except OSError:
+                existing = 0
+
+        if existing and existing < size:
+            self.offset = existing
+            if target_name:
+                self._close_fobj()
+                self.fobj = open(target_name, 'ab')
+            elif self.fobj:
+                try:
+                    self.fobj.seek(self.offset)
+                except OSError as e:
+                    logging.warning("Receiver: seek failed: %s", e)
+            self.state = 'receiving'
+            return _frame(_RESUME + struct.pack("!Q", self.offset))
+
+        if target_name:
+            self._close_fobj()
+            self.fobj = open(target_name, 'wb')
+        elif self.fobj:
+            try:
+                self.fobj.seek(0)
+                self.fobj.truncate(0)
+            except OSError as e:
+                logging.warning("Receiver: truncate failed: %s", e)
+        self.offset = 0
+        self.state = 'receiving'
+        return _frame(_ACK + struct.pack("!Q", self.offset))
+
+    def _on_data(self, payload):
+        if len(payload) < 9:
+            logging.debug("Receiver.receive: short DATA frame ignored")
+            return b""
+        off = struct.unpack("!Q", payload[1:9])[0]
+        chunk = payload[9:]
+        if off != self.offset:
+            return _frame(_RESUME + struct.pack("!Q", self.offset))
+        if self.fobj is None:
+            if not self.filepath:
+                return _frame(_RESUME + struct.pack("!Q", self.offset))
+            try:
+                self.fobj = open(self.filepath, 'ab')
+            except OSError:
+                return _frame(_RESUME + struct.pack("!Q", self.offset))
+        self.fobj.write(chunk)
+        self.fobj.flush()
+        self.offset += len(chunk)
+        return _frame(_ACK + struct.pack("!Q", self.offset))
+
+    def _on_end(self):
+        if self.expected_size is not None and self.offset != self.expected_size:
+            return _frame(_RESUME + struct.pack("!Q", self.offset))
+        self.state = 'done'
+        self._close_fobj()
+        return _frame(_END)

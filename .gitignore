@@ -33,6 +33,7 @@ env/
 # Temporary files created by the script
 temp_akita_dir_*.zip
 akita_*.zip
+incoming/
 
 # Distribution / packaging
 .Python

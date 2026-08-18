@@ -4,9 +4,9 @@ class MockCommands:
     def __init__(self):
         self.sent = []
 
-    async def send_msg(self, destination, payload):
-        # simulate network send delay
-        self.sent.append((destination, payload))
+    async def send_msg(self, dst, msg, timestamp=None):
+        # MeshCore 2.3.7: send_msg(dst, msg: str)
+        self.sent.append((dst, msg))
 
 
 class MockMesh:
@@ -26,6 +26,12 @@ class MockMesh:
         self.subscriptions.setdefault(event, []).append(callback)
 
     async def close(self):
+        return True
+
+    async def disconnect(self):
+        return True
+
+    async def start_auto_message_fetching(self):
         return True
 
 

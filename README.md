@@ -1,8 +1,9 @@
 # Akita-Zmodem-MeshCore
 This repository contains a **Python implementation of a lightweight ZMODEM-like
-file transfer protocol** that is tightly integrated with the MeshCore mesh
-networking client.  The code is intended to be self‑contained, dependency‑free
-(other than MeshCore when used), and covered by an extensive unit test suite.
+file transfer protocol** that is tightly integrated with the MeshCore companion
+client (`meshcore` 2.3.7). The protocol is self-contained. The only runtime
+dependency besides the optional `tqdm` progress bar is the MeshCore Python
+library.
 
 ## Development notes
 
@@ -47,13 +48,13 @@ This utility is designed for asynchronous operation, making it suitable for envi
 ## Key Features
 
 * **Built‑in Zmodem Protocol**: A fully self‑contained, Z‑modem‑like implementation lives in `zmodem.py`, so there is no requirement to install an external Zmodem library. The code handles handshakes, CRC32 framing, resumable transfers, per‑chunk port headers, and stale duplicate ACK/RESUME suppression for reliable operation over the mesh.
-* **MeshCore Integration**: Uses Python bindings for MeshCore networks (tested with `fdlamotte/meshcore_py` but compatible with any API providing `MeshCore.create_*`, `mesh.subscribe`, and `mesh.commands.send_msg`).
+* **MeshCore Integration**: Talks to companion radios through `meshcore` 2.3.7 (`create_serial`/`create_tcp`, `subscribe`, `send_msg(dst, msg)`, auto-fetch, auto-reconnect). File bytes are sent as `AZM1:` + base64 because companion `send_msg` is a UTF-8 text API, not a raw radio payload API.
 * **Async I/O with asyncio**: Non‑blocking operations keep transfers responsive even on poor links.
 * **File & Directory Support**: Send files directly or zip directories on‑the‑fly; received zips are automatically extracted.
-* **Chunk Header Handling**: Data sent over the mesh is split into `mesh_packet_chunk_size` fragments; each fragment begins with an application port header so the receiver can reassemble correctly. The default is `184` bytes, matching the current MeshCore payload ceiling.
+* **Chunk Header Handling**: Protocol frames are split into `mesh_packet_chunk_size` binary fragments (including a 2-byte app-port header), then encoded into a MeshCore text body. The default and maximum is `129` bytes so the encoded message fits a 179-character TXT_MSG.
 * **Configurable Timeouts**: Automatic cancellation of stalled transfers.
 * **JSON Configuration**: Tweak ports, chunk sizes, MeshCore connection params, and more via `akita_zmodem_meshcore_config.json` or CLI overrides.
-* **Robust CLI**: Commands (`send`, `receive`, `status`, `cancel`) either run as a one‑off or the script can operate as a long‑running daemon.
+* **Robust CLI**: Commands (`send`, `receive`, `status`, `cancel`) either run as a one‑off or the script can operate as a long‑running daemon. Daemon mode auto-saves inbound files into `incoming_dir`.
 * **Daemon Mode & Status**: Run as a listener and query active transfers.
 * **Cancellation & Safety**: Cancel mid‑transfer and protect against unwanted overwrites.
 * **Detailed Logging**: Built‑in logging at INFO/DEBUG levels aids debugging and monitoring.
@@ -70,7 +71,7 @@ All other functionality is self‑contained within the repository.
 
 ## Installation
 
-1.  **Python 3.8+ is recommended.**
+1.  **Python 3.10+ is required.**
 2.  **Clone the repository (or download the script).**
 3.  **Create and activate a virtual environment (recommended):**
     ```bash
@@ -83,6 +84,9 @@ All other functionality is self‑contained within the repository.
     ```
     This installs `meshcore` plus the optional `tqdm` helper listed in `requirements.txt`. No external `zmodem` package is required.
 
+Alternatively, from a checkout: `pip install -e .` (exposes the
+`akita-zmodem-meshcore` console script and `python akita_zmodem_meshcore.py --version`).
+
 ## Configuration
 
 1.  **Generate Configuration File**: The configuration file `akita_zmodem_meshcore_config.json` will be created with default settings in the same directory as the script if it doesn't exist when you run a command that initializes the application.
@@ -92,10 +96,11 @@ All other functionality is self‑contained within the repository.
 
 2.  **Edit Configuration**: Modify `akita_zmodem_meshcore_config.json` to suit your needs. Key settings include:
     * `zmodem_app_port`: An application-level port number used to distinguish Zmodem traffic over MeshCore.
-    * `mesh_packet_chunk_size`: Maximum size of data chunks sent over the mesh network, including the prepended app-port header. The valid MeshCore-safe range is greater than the 2-byte header size and at most `184` bytes.
+    * `mesh_packet_chunk_size`: Binary size of each mesh text message, including the 2-byte app-port header, before `AZM1`/base64 encoding. Valid range is `18` to `129`. Larger legacy values are clamped.
     * `timeout`: Transfer timeout in seconds.
     * `tx_delay_ms`, `min_tx_delay_ms`: Packet pacing controls that help prevent radio saturation.
-    * `max_consecutive_send_failures`, `max_inbound_queue`, `max_file_size_bytes`: Safety limits for failed sends, receive backlogs, and accidental oversized transfers.
+    * `max_consecutive_send_failures`, `max_inbound_queue`, `max_file_size_bytes`: Safety limits for failed sends, receive backlogs, and oversized transfers (enforced on send and receive; default 1 MiB).
+    * `auto_receive`, `incoming_dir`, `allowed_senders`: Daemon drop-box behaviour. Empty `allowed_senders` accepts every peer.
     * `mesh_connection_type`: How to connect to your MeshCore device (`serial` or `tcp`).
     * `mesh_serial_port`, `mesh_serial_baud`: Settings for serial connection.
     * `mesh_tcp_host`, `mesh_tcp_port`: Settings for TCP connection.
@@ -178,13 +183,12 @@ See `docs/USAGE.md` for detailed command explanations and examples.
 # Send a file to node with ID "!TargetNodeHexID"
 python akita_zmodem_meshcore.py send "!TargetNodeHexID" my_document.txt
 
-# On Machine B (Receiver - running in daemon mode):
-# Start the listener (it will use its config for connection)
+# On Machine B (Receiver - daemon auto-receive):
+# Incoming files land in incoming/ using the advertised filename.
 python akita_zmodem_meshcore.py
 
-# Alternatively, to pre-designate where a file should go on Machine B:
+# Alternatively, pre-declare an exact save path and wait for that transfer:
 # python akita_zmodem_meshcore.py receive received_files/my_document.txt [--overwrite]
-# This command will wait for the specific transfer to complete.
 ```
 
 ## Contributing

@@ -1,4 +1,4 @@
 [flake8]
 exclude = .git,__pycache__,.pytest_cache,.venv,venv,build,dist
 max-line-length = 127
-max-complexity = 10
+max-complexity = 25

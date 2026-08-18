@@ -12,16 +12,21 @@ The `--config` option may be used to point at a custom location for the JSON
 configuration file; the default is `akita_zmodem_meshcore_config.json`.
 
 
-If no COMMAND is provided, the utility runs in daemon/listener mode, waiting for incoming transfers. When a command like `send` or `receive` is used from the CLI, the script will now wait for that specific operation to complete before exiting.
+If no COMMAND is provided, the utility runs in daemon/listener mode. With
+`auto_receive` enabled (the default), inbound files are saved under
+`incoming_dir`. You can still use `receive` to wait on a specific path.
+When a command like `send` or `receive` is used from the CLI, the script
+waits for that specific operation to complete before exiting.
 > **Note:** The Zmodem protocol is implemented internally, so you do not need
 to install any external Zmodem library.  All protocol state, retransmits, and
 resumes are handled by `zmodem.py` shipped in this repository.
 
-> **MeshCore compatibility note:** `mesh_packet_chunk_size` includes the
-> prepended 2-byte app-port header and must not exceed the current MeshCore
-> payload limit of `184` bytes. MeshCore can also deliver duplicate control
+> **MeshCore compatibility note:** companion `send_msg` is a UTF-8 text API.
+> Chunks are encoded as `AZM1:` plus base64. `mesh_packet_chunk_size` is the
+> binary size (including the 2-byte app-port header) **before** encoding and
+> must not exceed `129` bytes. MeshCore can also deliver duplicate control
 > frames via different routes; the built-in sender ignores stale duplicate
-> ACK/RESUME frames so transfers do not rewind progress.
+> ACK/RESUME frames and waits for an ACK after each DATA block.
 ---
 
 ## Connection Arguments
@@ -59,9 +64,10 @@ These arguments override settings in the `akita_zmodem_meshcore_config.json` fil
 
 If you run the script without any specific command, it starts in daemon mode. It will connect to the MeshCore network (using configuration file settings or CLI overrides) and listen for incoming Zmodem transfers.
 
-Received files are accepted by pre-declared receive commands. Start a `receive`
-command on the destination node for the path where the next incoming transfer
-should be written.
+By default the daemon auto-receives files into `incoming_dir` (created if
+needed). Set `"auto_receive": false` if you only want pre-declared `receive`
+slots. Start a `receive` command when you want the next transfer written to
+an exact path and to block until it finishes.
 
 **Examples:**
 
@@ -214,9 +220,9 @@ Tips:
   
 - **Transfer IDs**: These are logged when a transfer starts and are required for `status` and `cancel` commands.
 
-- **Mesh Packet Size**: If you tune `mesh_packet_chunk_size`, keep it above the
-  2-byte app-port header plus the first protocol bytes and at or below `184` bytes unless the underlying
-  MeshCore payload limit changes.
+- **Mesh Packet Size**: If you tune `mesh_packet_chunk_size`, keep it at or
+  below `129` bytes so the `AZM1`/base64 text body still fits a MeshCore
+  TXT_MSG.
 
 - **Flood Protection**: Keep `tx_delay_ms` at or above `min_tx_delay_ms` on
   shared networks. The application rejects lower values unless
@@ -225,8 +231,10 @@ Tips:
   full, and ignores receive-slot traffic that does not look like a ZMODEM
   start frame.
 
-- **Large Transfers**: Set `max_file_size_bytes` for operational deployments
-  where an accidental large send would monopolize the mesh.
+- **Large Transfers**: `max_file_size_bytes` defaults to 1 MiB and is enforced
+  on both send and receive. Set it to `0` only if you intentionally want no
+  cap.
 
-- **Single CLI Operation at a Time**: CLI usage focuses on one transfer at a time. For general listening or background operation, run the utility in daemon mode (i.e., without a command).
+- **Single CLI Operation at a Time**: CLI `send`/`receive` focus on one
+  transfer. For a background drop-box, run the utility in daemon mode.
 

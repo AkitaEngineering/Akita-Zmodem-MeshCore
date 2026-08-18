@@ -1,8 +1,9 @@
 {
     "zmodem_app_port": 2001,
     "chunk_size": 256,
-    "mesh_packet_chunk_size": 184,
+    "mesh_packet_chunk_size": 129,
     "timeout": 120,
+    "retransmit_timeout_s": 8,
     "mesh_connection_type": "serial",
     "mesh_serial_port": "/dev/ttyUSB0",
     "mesh_serial_baud": 115200,
@@ -13,7 +14,10 @@
     "allow_unsafe_tx_delay": false,
     "max_consecutive_send_failures": 5,
     "max_inbound_queue": 128,
-    "max_file_size_bytes": 0,
+    "max_file_size_bytes": 1048576,
+    "auto_receive": true,
+    "incoming_dir": "incoming",
+    "allowed_senders": [],
     "control_host": "127.0.0.1",
     "control_port": 8765
 }

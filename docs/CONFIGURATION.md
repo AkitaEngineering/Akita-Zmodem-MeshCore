@@ -21,16 +21,21 @@ Here's an explanation of each field in the configuration file:
     * **Valid range**: `1` to `4096`
     * **Default**: `256`
 
-* `"mesh_packet_chunk_size": 184`  
-    * **Description**: The maximum size (in bytes) of the payload for a single packet sent over the MeshCore network, including the prepended `zmodem_app_port`. MeshCore firmware currently caps packet payloads at 184 bytes, so larger values are rejected by the application configuration. Zmodem protocol packets can be larger than what the underlying mesh radio can handle in one go, and this setting controls how those protocol data units are split into mesh-sized chunks.  
+* `"mesh_packet_chunk_size": 129`  
+    * **Description**: Binary size of one companion text message, including the prepended `zmodem_app_port` header, **before** `AZM1:` + base64 encoding. MeshCore `send_msg` carries UTF-8 text; a TXT_MSG body is at most 179 characters after radio overhead, so the largest safe binary chunk is 129 bytes. Values above that (including the old 184 default) are clamped with a warning.  
     * **Type**: Integer  
-    * **Valid range**: `18` to `184`
-    * **Default**: `184`
+    * **Valid range**: `18` to `129`
+    * **Default**: `129`
 
 * `"timeout": 120`
     * **Description**: The duration (in seconds) of inactivity after which an ongoing transfer is considered timed-out and subsequently canceled. Activity is defined as successfully sending or receiving data chunks relevant to the Zmodem transfer.
     * **Type**: Integer
     * **Default**: `120`
+
+* `"retransmit_timeout_s": 8`
+    * **Description**: If the sender is still waiting for an ACK or END confirmation after this many seconds, it resends the last packet.
+    * **Type**: Integer or float
+    * **Default**: `8`
 
 * `"tx_delay_ms": 150`
     * **Description**: Delay between mesh packet sends. This pacing is the main protection against flooding a low-bandwidth mesh.
@@ -57,10 +62,25 @@ Here's an explanation of each field in the configuration file:
     * **Type**: Integer
     * **Default**: `128`
 
-* `"max_file_size_bytes": 0`
-    * **Description**: Maximum file size allowed for sends. `0` disables the limit. Set this to a site-appropriate value to prevent accidental large transfers on constrained links.
+* `"max_file_size_bytes": 1048576`
+    * **Description**: Maximum file size allowed for sends **and** receives. Checked against the local file on send and against the advertised size in the START header on receive. `0` disables the limit.
     * **Type**: Integer
-    * **Default**: `0`
+    * **Default**: `1048576` (1 MiB)
+
+* `"auto_receive": true`
+    * **Description**: When running as a daemon (no `receive` slot), accept inbound START frames and write them under `incoming_dir` using the advertised filename.
+    * **Type**: Boolean
+    * **Default**: `true`
+
+* `"incoming_dir": "incoming"`
+    * **Description**: Directory used by daemon auto-receive. Created if missing. Existing names get a numeric suffix (`report-1.txt`).
+    * **Type**: String
+    * **Default**: `"incoming"`
+
+* `"allowed_senders": []`
+    * **Description**: If non-empty, only these MeshCore names or public-key prefixes may open a new inbound transfer. Acknowledgements for transfers you initiated are not filtered.
+    * **Type**: List of strings
+    * **Default**: `[]` (allow all)
 
 * `"mesh_connection_type": "serial"`  
     * **Description**: Specifies the method used to connect to the local MeshCore device/interface that the `meshcore_py` library will use.  
@@ -131,7 +151,7 @@ local network and device.
     "mesh_serial_port": "/dev/ttyUSB0",
     "mesh_serial_baud": 115200,
     "zmodem_app_port": 2001,
-    "mesh_packet_chunk_size": 184
+    "mesh_packet_chunk_size": 129
 }
 ```
 
@@ -153,7 +173,7 @@ daemon on a gateway machine), use the TCP connection type:
     "mesh_tcp_host": "192.168.1.100",
     "mesh_tcp_port": 4403,
     "zmodem_app_port": 2001,
-    "mesh_packet_chunk_size": 184
+    "mesh_packet_chunk_size": 129
 }
 ```
 
@@ -196,9 +216,9 @@ start and enable the service.
     correct `/dev/tty*` node.
 - TCP connection refused: verify the bridge/daemon is listening on the given
     host/port and there are no firewall rules blocking access.
-- Fragmentation or errors: reduce `mesh_packet_chunk_size` to accommodate a
-    smaller MTU on your radio link; the built-in default is 184 bytes and the
-    configured value cannot exceed the current MeshCore payload limit.
+- Fragmentation or errors: reduce `mesh_packet_chunk_size` if your firmware
+    has a smaller TXT_MSG body than 179 characters. The default of 129 binary
+    bytes already encodes into a full-size MeshCore text message.
 
 
 This command will attempt to connect via TCP to 192.168.1.50 on port 6500, overriding any serial settings in `akita_zmodem_meshcore_config.json` for this specific execution.

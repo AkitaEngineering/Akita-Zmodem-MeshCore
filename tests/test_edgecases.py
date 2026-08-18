@@ -3,6 +3,8 @@ import asyncio
 import pytest
 
 from akita_zmodem_meshcore import AkitaZmodemMeshCore, _safe_extract_zip
+from mesh_transport import MESHCORE_MAX_BINARY_CHUNK
+from tests.mocks import MockMesh
 
 
 @pytest.mark.asyncio
@@ -42,11 +44,11 @@ def test_validate_config_rejects_invalid_runtime_values(tmp_path, content):
         AkitaZmodemMeshCore(config_file=str(cfg))
 
 
-def test_validate_config_rejects_oversized_mesh_chunk(tmp_path):
-    cfg = tmp_path / "bad_chunk.json"
+def test_validate_config_clamps_oversized_mesh_chunk(tmp_path):
+    cfg = tmp_path / "legacy_chunk.json"
     cfg.write_text('{"mesh_packet_chunk_size": 185}')
-    with pytest.raises(ValueError):
-        AkitaZmodemMeshCore(config_file=str(cfg))
+    app = AkitaZmodemMeshCore(config_file=str(cfg))
+    assert app.mesh_packet_chunk_size == MESHCORE_MAX_BINARY_CHUNK
 
 
 @pytest.mark.parametrize(
@@ -286,3 +288,121 @@ async def test_receive_directory_uses_internal_temp_even_without_overwrite(
 
     assert captured['overwrite'] is True
     assert cli_event.is_set()
+
+
+def test_validate_config_accepts_max_encoded_chunk(tmp_path):
+    cfg = tmp_path / "ok.json"
+    cfg.write_text(
+        '{"mesh_packet_chunk_size": %d}' % MESHCORE_MAX_BINARY_CHUNK)
+    app = AkitaZmodemMeshCore(config_file=str(cfg))
+    assert app.mesh_packet_chunk_size == MESHCORE_MAX_BINARY_CHUNK
+
+
+@pytest.mark.asyncio
+async def test_connect_mesh_uses_meshcore_2_3_api(monkeypatch):
+    created = {}
+
+    class FakeMesh:
+        def __init__(self):
+            self.subs = []
+            self.auto = False
+
+        def subscribe(self, *args):
+            self.subs.append(args)
+
+        async def start_auto_message_fetching(self):
+            self.auto = True
+
+        async def disconnect(self):
+            return True
+
+    class FakeMC:
+        @staticmethod
+        async def create_serial(
+                port, baudrate=115200, auto_reconnect=False, **kwargs):
+            created["serial"] = (port, baudrate, auto_reconnect)
+            return FakeMesh()
+
+        @staticmethod
+        async def create_tcp(host, port, auto_reconnect=False, **kwargs):
+            created["tcp"] = (host, port, auto_reconnect)
+            return FakeMesh()
+
+    import akita_zmodem_meshcore as mod
+    monkeypatch.setattr(mod, "MeshCore", FakeMC)
+    app = mod.AkitaZmodemMeshCore({
+        "mesh_connection_type": "serial",
+        "mesh_serial_port": "/dev/ttyUSB0",
+        "mesh_serial_baud": 115200,
+    })
+    assert await app._connect_mesh() is True
+    assert created["serial"] == ("/dev/ttyUSB0", 115200, True)
+    assert app.mesh.auto is True
+
+    app.app_config["mesh_connection_type"] = "tcp"
+    app.app_config["mesh_tcp_host"] = "127.0.0.1"
+    app.app_config["mesh_tcp_port"] = 4403
+    assert await app._connect_mesh() is True
+    assert created["tcp"] == ("127.0.0.1", 4403, True)
+
+
+@pytest.mark.asyncio
+async def test_auto_receive_writes_to_incoming_dir(tmp_path):
+    import zmodem as zm
+
+    incoming = tmp_path / "inbox"
+    app = AkitaZmodemMeshCore({
+        "auto_receive": True,
+        "incoming_dir": str(incoming),
+        "tx_delay_ms": 50,
+    })
+    app.mesh = MockMesh()
+    src = tmp_path / "field-notes.txt"
+    src.write_bytes(b"abc123")
+    with open(src, "rb") as sf:
+        start = zm.Sender(sf, chunk_size=8).get_next_packet()
+
+    await app._handle_zmodem_data("aabbcc", start)
+
+    dest = incoming / "field-notes.txt"
+    assert dest.exists()
+    assert any(t["file"] == str(dest) for t in app.transfers.values())
+
+
+@pytest.mark.asyncio
+async def test_receive_rejects_oversized_start(tmp_path):
+    import zmodem as zm
+
+    app = AkitaZmodemMeshCore({"max_file_size_bytes": 4, "auto_receive": False})
+    app.mesh = MockMesh()
+    dest = tmp_path / "incoming.bin"
+    tid = await app.receive_file(str(dest), overwrite=True)
+    src = tmp_path / "big.bin"
+    src.write_bytes(b"12345")
+    with open(src, "rb") as sf:
+        start = zm.Sender(sf, chunk_size=8).get_next_packet()
+
+    await app._handle_zmodem_data("peer", start)
+    assert tid not in app.transfers
+    assert not dest.exists() or dest.stat().st_size == 0
+
+
+@pytest.mark.asyncio
+async def test_auto_receive_honors_allowlist(tmp_path):
+    import zmodem as zm
+
+    incoming = tmp_path / "inbox"
+    app = AkitaZmodemMeshCore({
+        "auto_receive": True,
+        "incoming_dir": str(incoming),
+        "allowed_senders": ["ffff"],
+    })
+    app.mesh = MockMesh()
+    src = tmp_path / "secret.bin"
+    src.write_bytes(b"nope")
+    with open(src, "rb") as sf:
+        start = zm.Sender(sf, chunk_size=8).get_next_packet()
+
+    await app._handle_zmodem_data("aabbcc", start)
+    assert not incoming.exists() or list(incoming.iterdir()) == []
+    assert app.transfers == {}

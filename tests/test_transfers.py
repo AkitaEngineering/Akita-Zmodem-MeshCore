@@ -186,14 +186,19 @@ async def test_send_file_chunks_use_destination_and_only_prefix_header(monkeypat
     assert tid is not None
     await asyncio.wait_for(cli_event.wait(), timeout=5.0)
 
+    from mesh_transport import decode_mesh_message
+
     header = struct.pack(APP_PORT_HEADER_FORMAT, app.zmodem_app_port)
     max_piece = app.mesh_packet_chunk_size - len(header)
     expected = [
-        ('destnode', header + packet[i:i + max_piece])
+        header + packet[i:i + max_piece]
         for i in range(0, len(packet), max_piece)
     ]
 
-    assert app.mesh.commands.sent == expected
+    assert [dst for dst, _ in app.mesh.commands.sent] == (
+        ['destnode'] * len(expected))
+    assert [decode_mesh_message(msg) for _, msg in app.mesh.commands.sent] == (
+        expected)
     assert tid not in app.transfers
 
 
@@ -238,8 +243,13 @@ async def test_receive_handler_replies_unicast_to_source(monkeypatch, tmp_path):
 
     await app._handle_zmodem_data('node123', b'MOCKDATA')
 
+    from mesh_transport import decode_mesh_message
+
     header = struct.pack(APP_PORT_HEADER_FORMAT, app.zmodem_app_port)
-    assert app.mesh.commands.sent == [('node123', header + response)]
+    assert len(app.mesh.commands.sent) == 1
+    dst, msg = app.mesh.commands.sent[0]
+    assert dst == 'node123'
+    assert decode_mesh_message(msg) == header + response
     assert tid not in app.transfers
 
 
@@ -625,15 +635,13 @@ async def test_end_to_end_app_transfer(tmp_path):
             self.subscriptions = {}
             self.other = None
 
-        async def send_msg(self, destination, payload):
-            # debug
-            print(f"[PairMesh] sending {len(payload)} bytes to {destination}")
+        async def send_msg(self, dst, msg, timestamp=None):
+            print(f"[PairMesh] sending {len(msg)} chars to {dst}")
             if self.other:
                 ev = types.SimpleNamespace(
                     payload={
-                        "decoded": {
-                            "payload": payload},
-                        "from": "peer"})
+                        "text": msg,
+                        "pubkey_prefix": "peer"})
                 for cb in self.other.subscriptions.get(
                         EventType.CONTACT_MSG_RECV, []):
                     await cb(ev)
@@ -660,8 +668,10 @@ async def test_end_to_end_app_transfer(tmp_path):
     importlib.reload(akita_zmodem_meshcore)
 
     # instantiate apps and connect meshes
-    app1 = akita_zmodem_meshcore.AkitaZmodemMeshCore()
-    app2 = akita_zmodem_meshcore.AkitaZmodemMeshCore()
+    app1 = akita_zmodem_meshcore.AkitaZmodemMeshCore(
+        {"tx_delay_ms": 0, "allow_unsafe_tx_delay": True})
+    app2 = akita_zmodem_meshcore.AkitaZmodemMeshCore(
+        {"tx_delay_ms": 0, "allow_unsafe_tx_delay": True})
     print("app1 mesh_packet_chunk_size", app1.mesh_packet_chunk_size)
     print("app2 mesh_packet_chunk_size", app2.mesh_packet_chunk_size)
     m1 = PairMesh()
