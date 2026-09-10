@@ -37,31 +37,35 @@ def _frame(payload: bytes) -> bytes:
 
 
 def _deframe(buffer: bytearray):
-    """Generator over complete payloads from *buffer*; leftover stays in buffer."""
-    while True:
-        if len(buffer) < 4:
+    """Yield CRC-checked frames, recovering after lost or corrupt fragments.
+
+    A retransmitted frame can follow an incomplete old frame in the stream.
+    Search for a complete, valid frame before trusting an incomplete length.
+    Retain incomplete input within the maximum frame size for the next call.
+    """
+    while len(buffer) >= 4:
+        found = False
+        for pos in range(len(buffer) - 3):
+            length = struct.unpack_from("!I", buffer, pos)[0]
+            if not 1 <= length <= MAX_FRAME_PAYLOAD:
+                continue
+            end = pos + 4 + length
+            if end + 4 > len(buffer):
+                continue
+            payload = bytes(buffer[pos + 4:end])
+            expected = struct.unpack_from("!I", buffer, end)[0]
+            if zlib.crc32(payload) & 0xFFFFFFFF != expected:
+                continue
+            del buffer[:end + 4]
+            yield payload
+            found = True
             break
-        length = struct.unpack("!I", buffer[:4])[0]
-        if length > MAX_FRAME_PAYLOAD:
-            logging.warning(
-                "_deframe: oversized packet length %d, clearing buffer",
-                length)
-            buffer.clear()
+        if not found:
+            if len(buffer) == 4 and struct.unpack("!I", buffer)[0] > MAX_FRAME_PAYLOAD:
+                buffer.clear()
+            elif len(buffer) > MAX_FRAME_PAYLOAD + 8:
+                del buffer[:-(MAX_FRAME_PAYLOAD + 8)]
             break
-        if len(buffer) < 4 + length + 4:
-            break
-        start = 4
-        end = 4 + length
-        payload = bytes(buffer[start:end])
-        crc_expected = struct.unpack("!I", buffer[end:end + 4])[0]
-        crc_actual = zlib.crc32(payload) & 0xFFFFFFFF
-        if crc_actual != crc_expected:
-            # drop corrupted packet and continue; log for diagnostics
-            logging.debug("_deframe: CRC mismatch, dropping packet")
-            del buffer[:4 + length + 4]
-            continue
-        yield payload
-        del buffer[:4 + length + 4]
 
 
 def parse_start_header(data: bytes):
@@ -90,6 +94,8 @@ def parse_start_header(data: bytes):
 
 class Sender:
     def __init__(self, fobj, chunk_size: int = 256):
+        if not isinstance(chunk_size, int) or not 1 <= chunk_size <= MAX_FRAME_PAYLOAD - 9:
+            raise ValueError("chunk_size is outside the protocol payload limit")
         self.fobj = fobj
         self.chunk_size = chunk_size
         self.filesize = os.fstat(fobj.fileno()).st_size
@@ -165,7 +171,7 @@ class Sender:
                 self._on_ack(payload)
             elif tp == _RESUME:
                 self._on_resume(payload)
-            elif tp == _END:
+            elif payload == _END and self.state == 'waiting_end_ack':
                 self.state = 'finished'
                 self._finished = True
             # other control frames ignored
@@ -178,18 +184,14 @@ class Sender:
             logging.warning("Sender: seek failed at offset %s: %s", offset, e)
 
     def _on_ack(self, payload):
-        if len(payload) < 9:
+        if len(payload) != 9 or self.state != 'waiting_ack':
             logging.debug("Sender.receive: short ACK frame ignored")
             return
         off = struct.unpack("!Q", payload[1:9])[0]
         # remote acknowledges up to off. Duplicate delivery is common
         # on MeshCore routes, so ignore anything older than the last
         # confirmed offset.
-        if off < 0:
-            off = 0
-        if off > self.filesize:
-            off = self.filesize
-        if off < self.acked_offset:
+        if off != self.offset or off < self.acked_offset:
             logging.debug(
                 "Sender.receive: stale ACK ignored (off=%d acked=%d)",
                 off, self.acked_offset)
@@ -201,36 +203,35 @@ class Sender:
         self.state = 'sending'
 
     def _on_resume(self, payload):
-        if len(payload) < 9:
+        if len(payload) != 9 or self.state not in ('waiting_ack', 'waiting_end_ack'):
             logging.debug("Sender.receive: short RESUME frame ignored")
             return
         off = struct.unpack("!Q", payload[1:9])[0]
         # Clamp resume offset to valid range before seeking. Ignore
         # resume requests that predate already-acknowledged progress.
-        if off < 0:
-            off = 0
         if off > self.filesize:
-            off = self.filesize
+            return
         if off < self.acked_offset:
             logging.debug(
                 "Sender.receive: stale RESUME ignored (off=%d acked=%d)",
                 off, self.acked_offset)
             return
+        self.acked_offset = off
         self.offset = off
         self._seek_to(off)
         self.state = 'sending'
 
 
 class Receiver:
-    def __init__(self, fobj_or_path):
+    def __init__(self, fobj_or_path, max_file_size=None):
         """Accept either a file-like object or a filepath string.
 
         If a path is provided, the Receiver will open/close the file as
         appropriate during the transfer to support resume logic without the
         caller pre-opening the file (which could truncate it).
         """
-        if isinstance(fobj_or_path, str):
-            self.filepath = fobj_or_path
+        if isinstance(fobj_or_path, (str, os.PathLike)):
+            self.filepath = os.fspath(fobj_or_path)
             self.fobj = None
         else:
             self.filepath = None
@@ -241,6 +242,7 @@ class Receiver:
         self.offset = 0
         self.expected_size = None
         self.filename = None
+        self.max_file_size = max_file_size
 
     def is_finished(self):
         return self.state == 'done'
@@ -257,8 +259,10 @@ class Receiver:
                 out += self._on_start(payload)
             elif tp == _DATA and self.state == 'receiving':
                 out += self._on_data(payload)
-            elif tp == _END and self.state == 'receiving':
+            elif payload == _END and self.state == 'receiving':
                 out += self._on_end()
+            elif payload == _END and self.state == 'done':
+                out += _frame(_END)
         return out
 
     def _target_name(self):
@@ -282,15 +286,22 @@ class Receiver:
             logging.debug("Receiver.receive: short START frame ignored")
             return b""
         name_len = struct.unpack("!H", payload[1:3])[0]
-        if len(payload) < 3 + name_len + 8:
+        if len(payload) != 3 + name_len + 8:
             logging.debug("Receiver.receive: truncated START frame ignored")
             return b""
         try:
-            self.filename = payload[3:3 + name_len].decode("utf-8")
+            filename = payload[3:3 + name_len].decode("utf-8")
         except UnicodeDecodeError:
-            self.filename = None
+            return b""
         size = struct.unpack("!Q",
                              payload[3 + name_len:3 + name_len + 8])[0]
+        if self.max_file_size and size > self.max_file_size:
+            raise ValueError("Advertised size exceeds max_file_size_bytes")
+        if self.state != 'waiting':
+            if filename == self.filename and size == self.expected_size:
+                return _frame(_RESUME + struct.pack("!Q", self.offset))
+            return b""
+        self.filename = filename
         self.expected_size = size
         target_name = self._target_name()
         existing = 0
@@ -332,6 +343,8 @@ class Receiver:
             return b""
         off = struct.unpack("!Q", payload[1:9])[0]
         chunk = payload[9:]
+        if self.expected_size is not None and off + len(chunk) > self.expected_size:
+            return _frame(_RESUME + struct.pack("!Q", self.offset))
         if off != self.offset:
             return _frame(_RESUME + struct.pack("!Q", self.offset))
         if self.fobj is None:

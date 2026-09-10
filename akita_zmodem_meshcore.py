@@ -13,6 +13,7 @@ import struct
 import signal
 import sys
 import hashlib
+import math
 
 from mesh_transport import (
     MESHCORE_MAX_BINARY_CHUNK,
@@ -151,6 +152,8 @@ def load_config(config_file: str = None):
     try:
         with open(config_file, "r") as f:
             loaded = json.load(f)
+            if not isinstance(loaded, dict):
+                raise ValueError("Configuration must be a JSON object")
             cfg = DEFAULT_CONFIG.copy()
             cfg.update(loaded)
             return cfg
@@ -214,15 +217,15 @@ def _safe_extract_zip(
             if normalized.startswith('..') or os.path.isabs(normalized):
                 raise UnsafeZipError(f"Unsafe path in zip archive: {member}")
             dest_path = os.path.join(extract_to, normalized)
-            abs_dest = os.path.abspath(dest_path)
-            abs_base = os.path.abspath(extract_to)
+            abs_dest = os.path.realpath(dest_path)
+            abs_base = os.path.realpath(extract_to)
             if not (
                 abs_dest == abs_base or abs_dest.startswith(
                     abs_base + os.sep)):
                 raise UnsafeZipError(
                     f"Zip would extract outside target: {member}")
             if not overwrite and not (member.endswith('/') or info.is_dir()):
-                if os.path.exists(abs_dest):
+                if os.path.lexists(abs_dest):
                     raise FileExistsError(
                         f"Zip member would overwrite existing file: {member}")
             advertised += max(info.file_size, 0)
@@ -239,9 +242,10 @@ def _safe_extract_zip(
                 os.makedirs(parent, exist_ok=True)
             # If this is a directory entry, skip file write
             if member.endswith('/') or info.is_dir():
+                os.makedirs(abs_dest, exist_ok=True)
                 continue
             # Stream extract member content to avoid large memory use
-            with z.open(info, 'r') as src, open(abs_dest, 'wb') as dst:
+            with z.open(info, 'r') as src, open(abs_dest, 'wb' if overwrite else 'xb') as dst:
                 for chunk in iter(lambda: src.read(8192), b''):
                     written += len(chunk)
                     if max_total_bytes and written > max_total_bytes:
@@ -264,6 +268,9 @@ class AkitaZmodemMeshCore:
         self._mesh_receive_queue = None
         self._temp_zips = []  # track temp archives for cleanup
         self._control_server = None
+        self._start_buffers = {}
+        self._completed_receivers = {}
+        self._send_lock = asyncio.Lock()
         # register instance temp files in global list for atexit cleanup
 
         def _register(fp):
@@ -318,7 +325,7 @@ class AkitaZmodemMeshCore:
 
     def _require_type(self, key, typ):
         val = self.app_config.get(key)
-        if val is not None and not isinstance(val, typ):
+        if val is None or isinstance(val, bool) or not isinstance(val, typ):
             raise ValueError(
                 f"Configuration key '{key}' must be {typ}, got {type(val)}")
         return val
@@ -354,8 +361,8 @@ class AkitaZmodemMeshCore:
         ]
         for key, typ in fields:
             val = self._require_type(key, typ)
-            if val is None:
-                continue
+            if isinstance(val, float) and not math.isfinite(val):
+                raise ValueError(f"{key} must be finite")
             if key in positives and val <= 0:
                 raise ValueError(f"{key} must be positive")
             if key in non_negatives and val < 0:
@@ -598,6 +605,11 @@ class AkitaZmodemMeshCore:
             raise RuntimeError(f"send_msg failed: {reason}")
 
     async def _send_packet_chunks(self, dest, packet: bytes):
+        # Keep fragments from concurrent transfers and replies together.
+        async with self._send_lock:
+            await self._send_packet_chunks_locked(dest, packet)
+
+    async def _send_packet_chunks_locked(self, dest, packet):
         header = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port)
         remaining = packet
         max_payload = self.mesh_packet_chunk_size - len(header)
@@ -693,6 +705,7 @@ class AkitaZmodemMeshCore:
         try:
             consecutive_failures = 0
             last_send = 0.0
+            retry_packet = b""
             while self.running:
                 if tid not in self.transfers:
                     break
@@ -700,8 +713,8 @@ class AkitaZmodemMeshCore:
                     logging.info(f"[Tx-{tid}] Transfer Complete.")
                     break
 
-                packet = await asyncio.to_thread(sender.get_next_packet)
-                retransmitting = False
+                packet = retry_packet or await asyncio.to_thread(sender.get_next_packet)
+                retransmitting = bool(retry_packet)
                 if not packet:
                     waiting = (
                         time.time() - last_send >= self.retransmit_timeout_s
@@ -716,13 +729,14 @@ class AkitaZmodemMeshCore:
                 if packet:
                     logging.debug(
                         f"[Tx-{tid}] next packet size {len(packet)} "
-                        f"state={sender.state}")
+                        f"state={getattr(sender, 'state', 'unknown')}")
                     try:
                         await self._send_packet_chunks(dest, packet)
                         consecutive_failures = 0
+                        retry_packet = b""
                         last_send = time.time()
-                        t["last_act"] = last_send
                     except Exception as e:
+                        retry_packet = packet
                         consecutive_failures += 1
                         logging.warning(f"[Tx-{tid}] Send Fail: {e}")
                         if (
@@ -757,7 +771,7 @@ class AkitaZmodemMeshCore:
             if cli_event:
                 cli_event.set()
             return None
-        if os.path.exists(filepath) and not overwrite:
+        if os.path.lexists(filepath) and not overwrite:
             logging.error(f"File exists: {filepath} (Use --overwrite)")
             if cli_event:
                 cli_event.set()
@@ -818,17 +832,25 @@ class AkitaZmodemMeshCore:
 
     def _unique_incoming_path(self, filename):
         base = os.path.join(self.incoming_dir, filename)
-        if not os.path.exists(base):
+        if not os.path.lexists(base):
             return base
         stem, ext = os.path.splitext(filename)
         n = 1
         while True:
             candidate = os.path.join(self.incoming_dir, f"{stem}-{n}{ext}")
-            if not os.path.exists(candidate):
+            if not os.path.lexists(candidate):
                 return candidate
             n += 1
 
     async def _match_transfer(self, src, data):
+        # Active peer sessions take priority over unbound receive requests.
+        for tid, t in list(self.transfers.items()):
+            if t["state"] == "receiving" and t.get("dest") == src:
+                return tid
+            if t["state"] == "sending" and (
+                    peer_matches(t.get("dest"), src)
+                    or peer_matches(t.get("dest_resolved"), src)):
+                return tid
         for tid, t in list(self.transfers.items()):
             if t["state"] == "waiting":
                 if not self._looks_like_zmodem_start(data):
@@ -851,19 +873,13 @@ class AkitaZmodemMeshCore:
                 try:
                     t["receiver"] = await asyncio.to_thread(
                         zmodem.Receiver, t["file"])
+                    t["receiver"].max_file_size = self.max_file_size_bytes
                 except Exception as e:
                     logging.error(
                         f"[Rx-{tid}] Cannot init receiver for '{t['file']}': {e}")
                     self.cancel_transfer(tid)
                     continue
                 logging.info(f"[Rx-{tid}] Incoming stream from {src} accepted")
-                return tid
-            if t["state"] == "receiving" and t.get("dest") == src:
-                return tid
-            if t["state"] == "sending" and (
-                    t.get("dest") == src
-                    or peer_matches(t.get("dest"), src)
-                    or peer_matches(t.get("dest_resolved"), src)):
                 return tid
         return None
 
@@ -900,8 +916,9 @@ class AkitaZmodemMeshCore:
         receiver = t["receiver"]
         logging.debug(f"[Rx-{tid}] delivering {len(data)} bytes to receiver")
         resp = await asyncio.to_thread(receiver.receive, data)
-        t["bytes"] += len(data)
+        t["bytes"] = getattr(receiver, "offset", t["bytes"])
         expected = getattr(receiver, "expected_size", None)
+        t["total"] = expected
         if (self.max_file_size_bytes and expected
                 and expected > self.max_file_size_bytes):
             logging.error(
@@ -909,10 +926,13 @@ class AkitaZmodemMeshCore:
                 "max_file_size_bytes")
             self.cancel_transfer(tid)
             return
+        finished = await asyncio.to_thread(receiver.is_finished)
+        if finished:
+            self._completed_receivers[t["dest"]] = (time.time(), receiver)
         if resp:
             logging.debug(f"[Rx-{tid}] sending {len(resp)} bytes back")
             await self._send_packet_chunks(t["dest"], resp)
-        if await asyncio.to_thread(receiver.is_finished):
+        if finished:
             logging.info(f"[Rx-{tid}] Transfer Complete.")
             checksum = await asyncio.to_thread(calculate_md5, t["file"])
             logging.info(f"[Rx-{tid}] File Saved. MD5: {checksum}")
@@ -921,12 +941,45 @@ class AkitaZmodemMeshCore:
     async def _handle_sending_ack(self, tid, t, data):
         logging.debug(f"[Tx-{tid}] delivering {len(data)} bytes to sender")
         resp = await asyncio.to_thread(t["sender"].receive, data)
+        t["bytes"] = getattr(t["sender"], "acked_offset", t["bytes"])
         logging.debug(
             f"[Tx-{tid}] sender returned {len(resp) if resp else 0} bytes")
         if resp:
             await self._send_packet_chunks(t["dest"], resp)
 
     async def _handle_zmodem_data(self, src, data):
+        now = time.time()
+        for cache in (self._start_buffers, self._completed_receivers):
+            for peer, (created, _) in list(cache.items()):
+                if now - created > self.timeout:
+                    del cache[peer]
+        completed = self._completed_receivers.get(src)
+        if completed and data == zmodem._frame(b'E'):
+            await self._send_packet_chunks(src, data)
+            return
+        bound = any(
+            t["state"] != "waiting" and (
+                peer_matches(t.get("dest"), src)
+                or peer_matches(t.get("dest_resolved"), src))
+            for t in self.transfers.values())
+        if not bound and hasattr(zmodem, 'parse_start_header'):
+            if self._looks_like_zmodem_start(data):
+                if len(self._start_buffers) >= self.app_config["max_inbound_queue"]:
+                    self._start_buffers.pop(next(iter(self._start_buffers)))
+                self._start_buffers[src] = (now, bytearray())
+            pending = self._start_buffers.get(src)
+            if pending is None:
+                return
+            pending[1].extend(data)
+            frame_size = struct.unpack('!I', pending[1][:4])[0] + 8
+            if len(pending[1]) < frame_size:
+                return
+            data = bytes(pending[1])
+            del self._start_buffers[src]
+            frames = list(zmodem._deframe(bytearray(data[:frame_size])))
+            if not frames or zmodem.parse_start_header(data) is None:
+                return
+            self._completed_receivers.pop(src, None)
         active_tid = await self._match_transfer(src, data)
         if not active_tid:
             created = await self._maybe_auto_receive(src, data)
@@ -977,7 +1030,12 @@ class AkitaZmodemMeshCore:
 
         def _zip():
             with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as z:
-                for root, _, files in os.walk(path):
+                total_bytes = 0
+                for root, dirs, files in os.walk(path):
+                    dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+                    for directory in dirs:
+                        p = os.path.join(root, directory)
+                        z.write(p, os.path.relpath(p, path))
                     for file in files:
                         p = os.path.join(root, file)
                         # skip symlinks to avoid unintentionally archiving
@@ -986,6 +1044,9 @@ class AkitaZmodemMeshCore:
                             logging.debug(
                                 f"Skipping symlink {p} in directory transfer")
                             continue
+                        total_bytes += os.path.getsize(p)
+                        if self.max_file_size_bytes and total_bytes > self.max_file_size_bytes:
+                            raise ValueError("Directory exceeds max_file_size_bytes uncompressed")
                         z.write(p, os.path.relpath(p, path))
 
         try:
