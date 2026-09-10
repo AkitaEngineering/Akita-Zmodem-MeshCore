@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+- Recover from failed sends and lost or duplicated data fragments; prevent
+  stale ACKs, repeated STARTs, and premature ENDs from advancing or resetting
+  transfers. Running receivers can repeat a lost final confirmation.
+- Assemble and validate complete START headers before selecting filenames or
+  accepting file sizes. Enforce advertised sizes before writing data.
+- Serialize outgoing frame fragments, route active peers before waiting receive
+  slots, report payload progress, and stop send tasks when canceled. Outbound
+  retries no longer keep an unresponsive peer alive indefinitely.
+- Reject ZIP paths escaping through existing symlinks, preserve empty
+  directories, and enforce uncompressed size limits when sending directories.
+  Canceled directory transfers are not extracted.
+- Reject null, boolean, and non-finite numeric configuration values; return
+  nonzero CLI exit codes for failed operations and invalid configuration.
+- Add protocol and application fault-injection regression tests and isolate
+  test fixtures from files in the developer's checkout.
+
 ## 1.0.0 - 2026-08-17
 
 - MeshCore 2.3.7 client compatibility: `create_serial(port, baudrate=...)`,

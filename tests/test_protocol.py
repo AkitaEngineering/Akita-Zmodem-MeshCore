@@ -121,7 +121,7 @@ def test_deframe_recovers_retransmitted_fragmented_packet(damage):
     if damage == 'missing':
         del pieces[1]
     elif damage == 'duplicate':
-        pieces.insert(1, pieces[0])
+        pieces.insert(1, pieces[1])
     else:
         pieces[1] = b'X' * len(pieces[1])
     buffer = bytearray()
@@ -130,3 +130,12 @@ def test_deframe_recovers_retransmitted_fragmented_packet(damage):
         buffer.extend(piece)
         decoded.extend(zm._deframe(buffer))
     assert decoded == [packet[4:-4]]
+
+
+def test_deframe_does_not_parse_frames_embedded_in_file_content():
+    embedded = zm._frame(b'E')
+    packet = zm._frame(b'D' + struct.pack('!Q', 0) + embedded + b'x' * 200)
+    buffer = bytearray(packet[:64])
+    assert list(zm._deframe(buffer)) == []
+    buffer.extend(packet[64:])
+    assert list(zm._deframe(buffer)) == [packet[4:-4]]

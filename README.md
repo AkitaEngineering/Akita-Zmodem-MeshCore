@@ -50,7 +50,7 @@ This utility is designed for asynchronous operation, making it suitable for envi
 * **Built‑in Zmodem Protocol**: A fully self‑contained, Z‑modem‑like implementation lives in `zmodem.py`, so there is no requirement to install an external Zmodem library. The code handles handshakes, CRC32 framing, resumable transfers, per‑chunk port headers, and stale duplicate ACK/RESUME suppression for reliable operation over the mesh.
 * **MeshCore Integration**: Talks to companion radios through `meshcore` 2.3.7 (`create_serial`/`create_tcp`, `subscribe`, `send_msg(dst, msg)`, auto-fetch, auto-reconnect). File bytes are sent as `AZM1:` + base64 because companion `send_msg` is a UTF-8 text API, not a raw radio payload API.
 * **Async I/O with asyncio**: Non‑blocking operations keep transfers responsive even on poor links.
-* **File & Directory Support**: Send files directly or zip directories on‑the‑fly; received zips are automatically extracted.
+* **File & Directory Support**: Send files directly or zip directories on‑the‑fly; ZIPs are extracted by `receive --directory` after a successful transfer. Daemon mode saves the ZIP for later use.
 * **Chunk Header Handling**: Protocol frames are split into `mesh_packet_chunk_size` binary fragments (including a 2-byte app-port header), then encoded into a MeshCore text body. The default and maximum is `129` bytes so the encoded message fits a 179-character TXT_MSG.
 * **Configurable Timeouts**: Automatic cancellation of stalled transfers.
 * **JSON Configuration**: Tweak ports, chunk sizes, MeshCore connection params, and more via `akita_zmodem_meshcore_config.json` or CLI overrides.

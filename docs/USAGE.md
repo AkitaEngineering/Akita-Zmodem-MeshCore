@@ -17,6 +17,8 @@ If no COMMAND is provided, the utility runs in daemon/listener mode. With
 `incoming_dir`. You can still use `receive` to wait on a specific path.
 When a command like `send` or `receive` is used from the CLI, the script
 waits for that specific operation to complete before exiting.
+Exit status is `0` on success, `1` for failed or canceled operations (including
+connection failures), and `2` for invalid configuration or command arguments.
 > **Note:** The Zmodem protocol is implemented internally, so you do not need
 to install any external Zmodem library.  All protocol state, retransmits, and
 resumes are handled by `zmodem.py` shipped in this repository.
@@ -123,10 +125,14 @@ Prepares the utility to receive an incoming file or directory and save it to the
 python akita_zmodem_meshcore.py receive /home/user/downloads/incoming_report.pdf
 
 # Receive a directory
-python akita_zmodem_meshcore.py receive /home/user/received_projects/ --overwrite
+python akita_zmodem_meshcore.py receive /home/user/received_projects/ --directory --overwrite
 ```
 
 **Behavior:** This sets up a "slot" for an incoming transfer and waits. Reception occurs when a remote node sends a file that matches this receive slot.
+
+Directory reception extracts only a successfully completed ZIP transfer. Empty
+directories are preserved, and `max_file_size_bytes` also limits the total
+uncompressed contents. Daemon auto-receive saves ZIP files without extracting them.
 
 ---
 

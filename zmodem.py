@@ -37,20 +37,32 @@ def _frame(payload: bytes) -> bytes:
 
 
 def _deframe(buffer: bytearray):
-    """Yield CRC-checked frames, recovering after lost or corrupt fragments.
+    """Yield CRC-checked frames and recover after damaged fragments.
 
-    A retransmitted frame can follow an incomplete old frame in the stream.
-    Search for a complete, valid frame before trusting an incomplete length.
-    Retain incomplete input within the maximum frame size for the next call.
+    Preserve a valid incomplete leading frame: binary file content may itself
+    contain framed bytes. Only search inside it after its CRC has failed.
     """
     while len(buffer) >= 4:
+        pending = None
         found = False
         for pos in range(len(buffer) - 3):
             length = struct.unpack_from("!I", buffer, pos)[0]
             if not 1 <= length <= MAX_FRAME_PAYLOAD:
                 continue
+            if pos + 4 == len(buffer):
+                pending = pos if pending is None else pending
+                break
+            tp = bytes(buffer[pos + 4:pos + 5])
+            if not ((tp == _START and length >= 11)
+                    or (tp == _DATA and length >= 9)
+                    or (tp in (_ACK, _RESUME) and length == 9)
+                    or (tp == _END and length == 1)):
+                continue
             end = pos + 4 + length
             if end + 4 > len(buffer):
+                if pos == 0:
+                    return
+                pending = pos if pending is None else pending
                 continue
             payload = bytes(buffer[pos + 4:end])
             expected = struct.unpack_from("!I", buffer, end)[0]
@@ -61,10 +73,13 @@ def _deframe(buffer: bytearray):
             found = True
             break
         if not found:
-            if len(buffer) == 4 and struct.unpack("!I", buffer)[0] > MAX_FRAME_PAYLOAD:
+            if pending is not None:
+                del buffer[:pending]
+            elif len(buffer) == 4 and struct.unpack("!I", buffer)[0] > MAX_FRAME_PAYLOAD:
                 buffer.clear()
-            elif len(buffer) > MAX_FRAME_PAYLOAD + 8:
-                del buffer[:-(MAX_FRAME_PAYLOAD + 8)]
+            else:
+                # Keep a partial length prefix that may begin the next frame.
+                del buffer[:-3]
             break
 
 
@@ -188,18 +203,13 @@ class Sender:
             logging.debug("Sender.receive: short ACK frame ignored")
             return
         off = struct.unpack("!Q", payload[1:9])[0]
-        # remote acknowledges up to off. Duplicate delivery is common
-        # on MeshCore routes, so ignore anything older than the last
-        # confirmed offset.
+        # Only an ACK for the outstanding block can advance the sender.
         if off != self.offset or off < self.acked_offset:
             logging.debug(
                 "Sender.receive: stale ACK ignored (off=%d acked=%d)",
                 off, self.acked_offset)
             return
         self.acked_offset = off
-        if off > self.offset:
-            self.offset = off
-            self._seek_to(self.offset)
         self.state = 'sending'
 
     def _on_resume(self, payload):
@@ -207,8 +217,7 @@ class Sender:
             logging.debug("Sender.receive: short RESUME frame ignored")
             return
         off = struct.unpack("!Q", payload[1:9])[0]
-        # Clamp resume offset to valid range before seeking. Ignore
-        # resume requests that predate already-acknowledged progress.
+        # Reject invalid offsets and requests older than confirmed progress.
         if off > self.filesize:
             return
         if off < self.acked_offset:

@@ -124,6 +124,8 @@ def peer_matches(stored, src):
     if stored is None or src is None:
         return False
     src = str(src).lstrip("!").lower()
+    if not src:
+        return False
     candidates = []
     if isinstance(stored, dict):
         for key in ("public_key", "public_key_hex", "adv_name", "name"):
@@ -144,6 +146,8 @@ def sender_is_allowed(src, allowed_senders):
     if not allowed_senders:
         return True
     src = str(src).lstrip("!").lower()
+    if not src:
+        return False
     for allowed in allowed_senders:
         token = str(allowed).lstrip("!").lower()
         if not token:

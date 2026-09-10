@@ -270,6 +270,7 @@ class AkitaZmodemMeshCore:
         self._control_server = None
         self._start_buffers = {}
         self._completed_receivers = {}
+        self._transfer_results = {}
         self._send_lock = asyncio.Lock()
         # register instance temp files in global list for atexit cleanup
 
@@ -684,7 +685,7 @@ class AkitaZmodemMeshCore:
             "cli_event": cli_event
         }
 
-        asyncio.create_task(self._send_loop(tid))
+        self.transfers[tid]["task"] = asyncio.create_task(self._send_loop(tid))
         return tid
 
     async def _send_loop(self, tid):
@@ -711,6 +712,7 @@ class AkitaZmodemMeshCore:
                     break
                 if await asyncio.to_thread(sender.is_finished):
                     logging.info(f"[Tx-{tid}] Transfer Complete.")
+                    t["state"] = "completed"
                     break
 
                 packet = retry_packet or await asyncio.to_thread(sender.get_next_packet)
@@ -928,6 +930,9 @@ class AkitaZmodemMeshCore:
             return
         finished = await asyncio.to_thread(receiver.is_finished)
         if finished:
+            t["state"] = "completed"
+            if len(self._completed_receivers) >= self.app_config["max_inbound_queue"]:
+                self._completed_receivers.pop(next(iter(self._completed_receivers)))
             self._completed_receivers[t["dest"]] = (time.time(), receiver)
         if resp:
             logging.debug(f"[Rx-{tid}] sending {len(resp)} bytes back")
@@ -997,7 +1002,7 @@ class AkitaZmodemMeshCore:
                 await self._handle_sending_ack(active_tid, t, data)
         except Exception as e:
             logging.error(f"[Tx/Rx-{active_tid}] Protocol error: {e}")
-            if t.get("state") == "receiving":
+            if t.get("state") in ("receiving", "completed"):
                 self.cancel_transfer(active_tid)
     # -------------------------------------------------------------------------
     # Directory Handling & Management
@@ -1083,6 +1088,7 @@ class AkitaZmodemMeshCore:
                     cli_event.set()
                 except Exception:
                     pass
+        return tid
 
     async def receive_directory(
             self,
@@ -1108,7 +1114,7 @@ class AkitaZmodemMeshCore:
             self._temp_zips.append(zip_name)
             self._register_temp(zip_name)
             await f_event.wait()
-            if os.path.exists(zip_name):
+            if self._transfer_results.get(tid) and os.path.exists(zip_name):
                 logging.info(f"Extracting to '{path}'...")
                 try:
                     await asyncio.to_thread(
@@ -1118,8 +1124,10 @@ class AkitaZmodemMeshCore:
                         overwrite,
                         self.max_file_size_bytes or None)
                 except UnsafeZipError as e:
+                    self._transfer_results[tid] = False
                     logging.error(f"Received zip rejected as unsafe: {e}")
                 except Exception as e:
+                    self._transfer_results[tid] = False
                     logging.error(
                         f"Failed to extract received zip '{zip_name}': {e}")
                 finally:
@@ -1128,6 +1136,11 @@ class AkitaZmodemMeshCore:
                             os.remove(zip_name)
                         except OSError:
                             pass
+            elif cleanup:
+                try:
+                    os.remove(zip_name)
+                except OSError:
+                    pass
         elif cleanup:
             try:
                 os.remove(zip_name)
@@ -1135,10 +1148,17 @@ class AkitaZmodemMeshCore:
                 pass
         if cli_event:
             cli_event.set()
+        return tid
 
     def cancel_transfer(self, tid):
         if tid in self.transfers:
             t = self.transfers.pop(tid)
+            self._transfer_results[tid] = t.get("state") == "completed"
+            if len(self._transfer_results) > self.app_config["max_inbound_queue"]:
+                self._transfer_results.pop(next(iter(self._transfer_results)))
+            task = t.get("task")
+            if task and not task.done() and task is not asyncio.current_task():
+                task.cancel()
             # Close any file handles in a thread to avoid blocking the loop
             if t.get("sync_f"):
                 try:
@@ -1196,6 +1216,7 @@ class AkitaZmodemMeshCore:
 
     async def stop(self):
         self.running = False
+        tasks = [t["task"] for t in self.transfers.values() if t.get("task")]
         if self._control_server:
             self._control_server.close()
             try:
@@ -1205,6 +1226,8 @@ class AkitaZmodemMeshCore:
             self._control_server = None
         for tid in list(self.transfers.keys()):
             self.cancel_transfer(tid)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         if self.mesh:
             try:
                 if hasattr(self.mesh, "disconnect"):
@@ -1309,7 +1332,7 @@ async def main():
             getattr(args, "id", None),
         )
         print(json.dumps(response, default=str, indent=2))
-        return
+        return 0 if response.get("ok") else 1
 
     # Clean Exit
     def sig_handler():
@@ -1322,10 +1345,10 @@ async def main():
 
     try:
         if not await app._connect_mesh():
-            return
+            return 1
     except Exception as e:
         logging.error(f"Failed to connect to mesh: {e}")
-        return
+        return 1
 
     # start background processors in all modes; send-only operations will
     # simply sit idle, but receive commands and the daemon depend on them.
@@ -1338,10 +1361,11 @@ async def main():
     try:
         if args.command == "send":
             if os.path.isdir(args.path):
-                await app.send_directory(args.dest, args.path, cli_event)
+                tid = await app.send_directory(args.dest, args.path, cli_event)
             else:
-                await app.send_file(args.dest, args.path, cli_event)
+                tid = await app.send_file(args.dest, args.path, cli_event)
             await cli_event.wait()
+            return 0 if app._transfer_results.get(tid) else 1
 
         elif args.command == "receive":
             is_dir = getattr(
@@ -1350,10 +1374,11 @@ async def main():
                 False) or os.path.isdir(
                 args.path)
             if is_dir:
-                await app.receive_directory(args.path, args.overwrite, cli_event)
+                tid = await app.receive_directory(args.path, args.overwrite, cli_event)
             else:
-                await app.receive_file(args.path, args.overwrite, cli_event)
+                tid = await app.receive_file(args.path, args.overwrite, cli_event)
             await cli_event.wait()
+            return 0 if app._transfer_results.get(tid) else 1
 
         else:
             if app.auto_receive:
@@ -1384,9 +1409,12 @@ async def main():
 
 def main_entry():
     try:
-        asyncio.run(main())
+        sys.exit(asyncio.run(main()))
     except KeyboardInterrupt:
-        pass
+        sys.exit(130)
+    except ValueError as e:
+        logging.error("%s", e)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

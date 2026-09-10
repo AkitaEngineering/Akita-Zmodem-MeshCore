@@ -1,7 +1,6 @@
 ﻿import asyncio
 import io
 import os
-import shutil
 import sys
 import types
 import json
@@ -17,18 +16,8 @@ TEST_DIR = os.path.join(os.path.dirname(__file__), "tmp_test_dir")
 
 @pytest.fixture(autouse=True)
 def setup_env(tmp_path, monkeypatch):
-    # Ensure working test dir
-    if os.path.exists(TEST_DIR):
-        shutil.rmtree(TEST_DIR)
+    monkeypatch.setattr(sys.modules[__name__], 'TEST_DIR', str(tmp_path / 'source'))
     os.makedirs(TEST_DIR, exist_ok=True)
-
-    # Clean any leftover temp zips from previous runs
-    for f in os.listdir(os.getcwd()):
-        if f.endswith('.zip') and f.startswith('akita_'):
-            try:
-                os.remove(f)
-            except Exception:
-                pass
 
     # Create a small file to send
     with open(os.path.join(TEST_DIR, "file1.txt"), "wb") as f:
@@ -60,10 +49,6 @@ def setup_env(tmp_path, monkeypatch):
     monkeypatch.setattr(akita_zmodem_meshcore, 'zmodem', mock_zmod)
 
     yield
-
-    # teardown
-    if os.path.exists(TEST_DIR):
-        shutil.rmtree(TEST_DIR)
 
 
 @pytest.mark.asyncio
@@ -299,6 +284,7 @@ async def test_receive_directory_extracts(monkeypatch, tmp_path):
         # create a simple zip containing one file
         with zipfile.ZipFile(filepath, "w") as zf:
             zf.writestr("hello.txt", "world")
+        self._transfer_results[1] = True
         ev.set()
         return 1
 
@@ -624,7 +610,7 @@ def test_zmodem_receiver_ignores_malformed_frames():
 
 
 @pytest.mark.asyncio
-async def test_end_to_end_app_transfer(tmp_path):
+async def test_end_to_end_app_transfer(tmp_path, monkeypatch):
     # build two apps with a simple in-memory mesh linking them
     from akita_zmodem_meshcore import EventType
     import types
@@ -654,18 +640,13 @@ async def test_end_to_end_app_transfer(tmp_path):
 
     # make sure the application imports the real zmodem implementation
     import importlib
-    import sys
     import os
-    if 'zmodem' in sys.modules:
-        del sys.modules['zmodem']
     spec = importlib.util.spec_from_file_location(
         'zmodem', os.path.join(os.getcwd(), 'zmodem.py'))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    sys.modules['zmodem'] = module
-    # force reload of application module so it picks up the real zmodem
     import akita_zmodem_meshcore
-    importlib.reload(akita_zmodem_meshcore)
+    monkeypatch.setattr(akita_zmodem_meshcore, 'zmodem', module)
 
     # instantiate apps and connect meshes
     app1 = akita_zmodem_meshcore.AkitaZmodemMeshCore(

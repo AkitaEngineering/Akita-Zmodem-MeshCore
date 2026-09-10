@@ -156,9 +156,10 @@ async def test_handle_zmodem_data_receiver_init_failure(tmp_path, monkeypatch):
             return False
 
     monkeypatch.setattr('zmodem.Receiver', DummyRecv)
-    app._looks_like_zmodem_start = lambda data: True
-    # run handler with dummy data
-    await app._handle_zmodem_data('peer', b'hello')
+    import struct
+    import zmodem
+    start = zmodem._frame(b'S' + struct.pack('!H', 1) + b'x' + struct.pack('!Q', 0))
+    await app._handle_zmodem_data('peer', start)
     # transfer should have been cancelled
     assert tid not in app.transfers
 
